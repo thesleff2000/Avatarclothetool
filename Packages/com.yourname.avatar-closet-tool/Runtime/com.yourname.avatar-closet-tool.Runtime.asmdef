@@ -1,0 +1,14 @@
+{
+  "name": "com.yourname.avatar-closet-tool.Runtime",
+  "rootNamespace": "YourName.AvatarClosetTool",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
