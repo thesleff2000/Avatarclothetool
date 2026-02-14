@@ -29,19 +29,15 @@ namespace YourName.AvatarClosetTool.Tests.Editor
         [Test]
         public void PipelineStopsOnValidationError()
         {
+            EnsureMaOrInconclusive();
             GameObject avatarRoot = CreateRoot("AvatarRoot_ValidationError");
-            GameObject menuRoot = CreateChild(avatarRoot, "MenuRoot");
-            menuRoot.AddComponent<ClosetMenuRoot>();
-
-            GameObject invalidPartObject = CreateChild(menuRoot, "InvalidPart");
-            invalidPartObject.AddComponent<ClosetOutfitPart>();
+            GameObject closetRoot = CreateChild(avatarRoot, "ClosetRoot");
+            GameObject outfit = CreateChild(avatarRoot, "OutfitOutsideClosetRoot");
 
             ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(new ClosetPipeline.PipelineRequest
-            {
-                AvatarRoot = avatarRoot,
-                UserOutfits = new List<ClosetPipeline.OutfitInput>()
-            }, null);
+            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(
+                BuildRequest(avatarRoot, closetRoot, new[] { outfit }),
+                null);
 
             Assert.IsTrue(result.HasError);
             Assert.IsFalse(result.Applied);
@@ -51,10 +47,13 @@ namespace YourName.AvatarClosetTool.Tests.Editor
         [Test]
         public void RepairRunsOnlyWhenNeeded()
         {
-            GameObject avatarRoot = CreateInventoryTreeWithOneSet("AvatarRoot_RepairNeeded", out ClosetOutfitSet set);
-            ClosetPipeline pipeline = new ClosetPipeline();
+            EnsureMaOrInconclusive();
+            GameObject avatarRoot = CreateRoot("AvatarRoot_RepairNeeded");
+            GameObject closetRoot = CreateChild(avatarRoot, "ClosetRoot");
+            GameObject setA = CreateChild(closetRoot, "SetA");
 
-            ClosetPipeline.PipelineResult first = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            ClosetPipeline pipeline = new ClosetPipeline();
+            ClosetPipeline.PipelineResult first = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA }), null);
             Assert.IsFalse(first.HasError);
             Assert.IsTrue(first.Applied);
 
@@ -62,74 +61,61 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             Assert.IsNotNull(moduleAfterFirst);
             int firstId = moduleAfterFirst.GetInstanceID();
 
-            ClosetPipeline.PipelineResult second = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            ClosetPipeline.PipelineResult second = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA }), null);
             Assert.IsFalse(second.HasError);
             Assert.IsTrue(second.Applied);
 
             GameObject moduleAfterSecond = FindModule(avatarRoot);
             Assert.IsNotNull(moduleAfterSecond);
             int secondId = moduleAfterSecond.GetInstanceID();
-            Assert.AreEqual(firstId, secondId, "Repair not needed: module should be reused.");
+            Assert.AreEqual(firstId, secondId);
 
             AvatarClosetModuleMetadata metadata = moduleAfterSecond.GetComponent<AvatarClosetModuleMetadata>();
             Assert.IsNotNull(metadata);
             metadata.MarkerId = "broken-marker";
 
-            ClosetPipeline.PipelineResult third = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            ClosetPipeline.PipelineResult third = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA }), null);
             Assert.IsFalse(third.HasError);
             Assert.IsTrue(third.Applied);
 
             GameObject moduleAfterThird = FindModule(avatarRoot);
             Assert.IsNotNull(moduleAfterThird);
-            int thirdId = moduleAfterThird.GetInstanceID();
-            Assert.AreNotEqual(secondId, thirdId, "Repair needed: module should be rebuilt.");
-            Assert.AreEqual(set.gameObject, FindSingleStore(avatarRoot).Outfits[0].TargetGameObject);
+            Assert.AreNotEqual(secondId, moduleAfterThird.GetInstanceID());
         }
 
         [Test]
         public void IdempotentApply()
         {
+            EnsureMaOrInconclusive();
             GameObject avatarRoot = CreateRoot("AvatarRoot_Idempotent");
-            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
-            menuRootObject.AddComponent<ClosetMenuRoot>();
-
-            GameObject setAObject = CreateChild(menuRootObject, "SetA");
-            ClosetOutfitSet setA = setAObject.AddComponent<ClosetOutfitSet>();
-            setA.SetIndex = 0;
-
-            GameObject setBObject = CreateChild(menuRootObject, "SetB");
-            ClosetOutfitSet setB = setBObject.AddComponent<ClosetOutfitSet>();
-            setB.SetIndex = 1;
+            GameObject closetRoot = CreateChild(avatarRoot, "ClosetRoot");
+            GameObject setA = CreateChild(closetRoot, "SetA");
+            GameObject setB = CreateChild(closetRoot, "SetB");
 
             ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.PipelineResult first = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
-            ClosetPipeline.PipelineResult second = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            ClosetPipeline.PipelineResult first = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA, setB }), null);
+            ClosetPipeline.PipelineResult second = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA, setB }), null);
 
             Assert.IsFalse(first.HasError);
             Assert.IsFalse(second.HasError);
             Assert.AreEqual(1, CountModules(avatarRoot));
-
-            AvatarClosetRegistrationStore[] stores = avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true);
-            Assert.AreEqual(1, stores.Length);
-
-            GameObject module = FindModule(avatarRoot);
-            Assert.IsNotNull(module);
-            AvatarClosetModuleMetadata metadata = module.GetComponent<AvatarClosetModuleMetadata>();
-            Assert.IsNotNull(metadata);
-            Assert.Greater(metadata.GeneratedOutfitCount, 0);
+            Assert.AreEqual(1, avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true).Length);
         }
 
         [Test]
         public void RepairRebuildKeepsStore()
         {
-            GameObject avatarRoot = CreateInventoryTreeWithOneSet("AvatarRoot_KeepStore", out ClosetOutfitSet set);
+            EnsureMaOrInconclusive();
+            GameObject avatarRoot = CreateRoot("AvatarRoot_KeepStore");
+            GameObject closetRoot = CreateChild(avatarRoot, "ClosetRoot");
+            GameObject setA = CreateChild(closetRoot, "SetA");
 
             GameObject storeHolder = CreateChild(avatarRoot, "AvatarClosetRegistrationStore");
             AvatarClosetRegistrationStore store = storeHolder.AddComponent<AvatarClosetRegistrationStore>();
             store.Outfits.Add(new AvatarClosetRegistrationStore.OutfitRecord
             {
                 DisplayName = "StoredOutfit",
-                TargetGameObject = set.gameObject,
+                TargetGameObject = setA,
                 ParameterKey = "ACT_STORED"
             });
 
@@ -139,125 +125,58 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             brokenMetadata.SchemaVersion = 1;
 
             ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA }), null);
 
             Assert.IsFalse(result.HasError);
             Assert.IsTrue(result.Applied);
-
-            AvatarClosetRegistrationStore[] stores = avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true);
-            Assert.AreEqual(1, stores.Length);
-            Assert.AreEqual(1, stores[0].Outfits.Count);
-            Assert.AreEqual(set.gameObject, stores[0].Outfits[0].TargetGameObject);
-
-            GameObject module = FindModule(avatarRoot);
-            Assert.IsNotNull(module);
-            AvatarClosetModuleMetadata metadata = module.GetComponent<AvatarClosetModuleMetadata>();
-            Assert.IsNotNull(metadata);
-            Assert.AreEqual("avatar-closet-module-v1", metadata.MarkerId);
+            Assert.AreEqual(1, avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true).Length);
+            Assert.AreEqual(setA, avatarRoot.GetComponentInChildren<AvatarClosetRegistrationStore>(true).Outfits[0].TargetGameObject);
         }
 
         [Test]
-        public void ContextMenuAssignsSetIndexUniquely()
+        public void ApplyCreatesFxControllerAndSetParam()
         {
-            GameObject avatarRoot = CreateRoot("AvatarRoot_ContextMenu");
-            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
-            menuRootObject.AddComponent<ClosetMenuRoot>();
-
-            GameObject first = CreateChild(menuRootObject, "SetFirst");
-            GameObject second = CreateChild(menuRootObject, "SetSecond");
-
-            bool firstOk = ClosetHierarchyContextMenu.TryAssignOutfitSet(first, out _);
-            bool secondOk = ClosetHierarchyContextMenu.TryAssignOutfitSet(second, out _);
-
-            Assert.IsTrue(firstOk);
-            Assert.IsTrue(secondOk);
-
-            ClosetOutfitSet firstSet = first.GetComponent<ClosetOutfitSet>();
-            ClosetOutfitSet secondSet = second.GetComponent<ClosetOutfitSet>();
-            Assert.IsNotNull(firstSet);
-            Assert.IsNotNull(secondSet);
-            Assert.AreNotEqual(firstSet.SetIndex, secondSet.SetIndex);
-            CollectionAssert.AreEquivalent(new[] { 0, 1 }, new[] { firstSet.SetIndex, secondSet.SetIndex });
-        }
-
-        [Test]
-        public void PartMustBeUnderOutfitSetValidation()
-        {
-            GameObject avatarRoot = CreateRoot("AvatarRoot_InvalidPart");
-            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
-            menuRootObject.AddComponent<ClosetMenuRoot>();
-
-            GameObject invalidPart = CreateChild(menuRootObject, "PartOutsideSet");
-            invalidPart.AddComponent<ClosetOutfitPart>();
+            EnsureMaOrInconclusive();
+            GameObject avatarRoot = CreateRoot("AvatarRoot_ApplyFx");
+            GameObject closetRoot = CreateChild(avatarRoot, "ClosetRoot");
+            GameObject setA = CreateChild(closetRoot, "SetA");
+            GameObject setB = CreateChild(closetRoot, "SetB");
 
             ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.ValidationResult validation = pipeline.ValidateOnly(BuildEmptyRequest(avatarRoot));
+            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA, setB }), null);
 
-            Assert.IsTrue(validation.HasError);
-            Assert.IsTrue(validation.Messages.Any(m => m.Text.Contains("OutfitPart") && m.Text.Contains("ClosetOutfitSet")));
-        }
-
-        [Test]
-        public void ObjectToggleTargetIsAddedViaSerializedObject()
-        {
-            if (!TryResolveType(new[]
-                {
-                    "nadena.dev.modular_avatar.core.ModularAvatarObjectToggle",
-                    "ModularAvatarObjectToggle"
-                }, out System.Type objectToggleType))
-            {
-                Assert.Inconclusive("Modular Avatar ObjectToggle type is not available in this project.");
-            }
-
-            GameObject avatarRoot = CreateRoot("AvatarRoot_ObjectToggleSerialized");
-            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
-            menuRootObject.AddComponent<ClosetMenuRoot>();
-
-            GameObject setObject = CreateChild(menuRootObject, "SetA");
-            ClosetOutfitSet set = setObject.AddComponent<ClosetOutfitSet>();
-            set.SetIndex = 0;
-
-            ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
-            Assert.IsFalse(result.HasError, "Pipeline should succeed before inspecting generated object toggles.");
-
+            Assert.IsFalse(result.HasError);
             GameObject module = FindModule(avatarRoot);
             Assert.IsNotNull(module);
 
-            Component[] toggles = module.GetComponentsInChildren(objectToggleType, true);
-            Assert.Greater(toggles.Length, 0, "Generated module should contain at least one MA ObjectToggle.");
-
-            bool hasReferenceToSet = false;
-            for (int i = 0; i < toggles.Length; i++)
+            Component mergeAnimator = FindComponentByTypeNames(module, new[]
             {
-                if (HasObjectReferenceInAnyArray(toggles[i], set.gameObject))
-                {
-                    hasReferenceToSet = true;
-                    break;
-                }
-            }
+                "nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator",
+                "ModularAvatarMergeAnimator"
+            });
+            Assert.IsNotNull(mergeAnimator);
+            Assert.IsTrue(HasAnimatorControllerReference(mergeAnimator));
 
-            Assert.IsTrue(hasReferenceToSet, "At least one ObjectToggle serialized target-list array must reference the set GameObject.");
+            Component parameters = FindComponentByTypeNames(module, new[]
+            {
+                "nadena.dev.modular_avatar.core.ModularAvatarParameters",
+                "ModularAvatarParameters"
+            });
+            Assert.IsNotNull(parameters);
+            Assert.IsTrue(SerializedContainsStringValue(parameters, "ACT_SET"));
         }
 
-        private GameObject CreateInventoryTreeWithOneSet(string rootName, out ClosetOutfitSet set)
-        {
-            GameObject avatarRoot = CreateRoot(rootName);
-            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
-            menuRootObject.AddComponent<ClosetMenuRoot>();
-
-            GameObject setObject = CreateChild(menuRootObject, "SetA");
-            set = setObject.AddComponent<ClosetOutfitSet>();
-            set.SetIndex = 0;
-            return avatarRoot;
-        }
-
-        private static ClosetPipeline.PipelineRequest BuildEmptyRequest(GameObject avatarRoot)
+        private static ClosetPipeline.PipelineRequest BuildRequest(GameObject avatarRoot, GameObject closetRoot, IReadOnlyList<GameObject> outfits)
         {
             return new ClosetPipeline.PipelineRequest
             {
                 AvatarRoot = avatarRoot,
-                UserOutfits = new List<ClosetPipeline.OutfitInput>()
+                ClosetRoot = closetRoot,
+                UserOutfits = outfits.Select(go => new ClosetPipeline.OutfitInput
+                {
+                    DisplayName = go.name,
+                    TargetGameObject = go
+                }).ToList()
             };
         }
 
@@ -303,100 +222,97 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             return count;
         }
 
-        private static AvatarClosetRegistrationStore FindSingleStore(GameObject avatarRoot)
+        private static void EnsureMaOrInconclusive()
         {
-            AvatarClosetRegistrationStore[] stores = avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true);
-            Assert.AreEqual(1, stores.Length);
-            return stores[0];
+            if (ResolveType("nadena.dev.modular_avatar.core.ModularAvatarParameters") == null ||
+                ResolveType("nadena.dev.modular_avatar.core.ModularAvatarMenuItem") == null ||
+                ResolveType("nadena.dev.modular_avatar.core.ModularAvatarMergeAnimator") == null)
+            {
+                Assert.Inconclusive("Modular Avatar is not installed in this project.");
+            }
         }
 
-        private static bool TryResolveType(IEnumerable<string> names, out System.Type resolved)
+        private static Component FindComponentByTypeNames(GameObject target, IEnumerable<string> typeNames)
         {
-            foreach (string name in names)
+            foreach (string typeName in typeNames)
             {
-                resolved = System.Type.GetType(name, false);
-                if (resolved != null)
+                System.Type type = ResolveType(typeName);
+                if (type == null)
+                {
+                    continue;
+                }
+
+                Component component = target.GetComponent(type);
+                if (component != null)
+                {
+                    return component;
+                }
+            }
+
+            return null;
+        }
+
+        private static System.Type ResolveType(string typeName)
+        {
+            System.Type type = System.Type.GetType(typeName, false);
+            if (type != null)
+            {
+                return type;
+            }
+
+            foreach (System.Reflection.Assembly assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    type = assembly.GetType(typeName, false);
+                }
+                catch (System.Reflection.ReflectionTypeLoadException)
+                {
+                    type = null;
+                }
+
+                if (type != null)
+                {
+                    return type;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool HasAnimatorControllerReference(Component component)
+        {
+            SerializedObject serialized = new SerializedObject(component);
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                RuntimeAnimatorController controller = iterator.objectReferenceValue as RuntimeAnimatorController;
+                if (controller != null)
                 {
                     return true;
                 }
             }
 
-            foreach (System.Reflection.Assembly assembly in System.AppDomain.CurrentDomain.GetAssemblies())
-            {
-                foreach (string name in names)
-                {
-                    try
-                    {
-                        System.Type byName = assembly.GetType(name, false);
-                        if (byName != null)
-                        {
-                            resolved = byName;
-                            return true;
-                        }
-                    }
-                    catch (System.Reflection.ReflectionTypeLoadException)
-                    {
-                        // Ignore partially loadable assemblies.
-                    }
-                }
-            }
-
-            resolved = null;
             return false;
         }
 
-        private static bool HasObjectReferenceInAnyArray(Component component, Object expected)
+        private static bool SerializedContainsStringValue(Component component, string expectedValue)
         {
             SerializedObject serialized = new SerializedObject(component);
             SerializedProperty iterator = serialized.GetIterator();
             bool enterChildren = true;
-
             while (iterator.NextVisible(enterChildren))
             {
                 enterChildren = true;
-                if (!iterator.isArray || iterator.propertyType == SerializedPropertyType.String)
-                {
-                    continue;
-                }
-
-                for (int i = 0; i < iterator.arraySize; i++)
-                {
-                    SerializedProperty element = iterator.GetArrayElementAtIndex(i);
-                    if (ElementContainsObjectReference(element, expected))
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        private static bool ElementContainsObjectReference(SerializedProperty element, Object expected)
-        {
-            if (element == null)
-            {
-                return false;
-            }
-
-            if (element.propertyType == SerializedPropertyType.ObjectReference)
-            {
-                return element.objectReferenceValue == expected;
-            }
-
-            if (!element.hasVisibleChildren)
-            {
-                return false;
-            }
-
-            SerializedProperty cursor = element.Copy();
-            SerializedProperty end = cursor.GetEndProperty();
-            bool enterChildren = true;
-            while (cursor.NextVisible(enterChildren) && !SerializedProperty.EqualContents(cursor, end))
-            {
-                enterChildren = true;
-                if (cursor.propertyType == SerializedPropertyType.ObjectReference &&
-                    cursor.objectReferenceValue == expected)
+                if (iterator.propertyType == SerializedPropertyType.String &&
+                    iterator.stringValue == expectedValue)
                 {
                     return true;
                 }

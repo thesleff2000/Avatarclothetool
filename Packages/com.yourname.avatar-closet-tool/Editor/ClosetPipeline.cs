@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 using YourName.AvatarClosetTool.Runtime;
 
@@ -103,6 +104,7 @@ namespace YourName.AvatarClosetTool.Editor
         public sealed class PipelineRequest
         {
             public GameObject AvatarRoot;
+            public GameObject ClosetRoot;
             public IReadOnlyList<OutfitInput> UserOutfits;
         }
 
@@ -186,6 +188,7 @@ namespace YourName.AvatarClosetTool.Editor
         {
             ValidationResult result = new ValidationResult();
             GameObject avatarRoot = request != null ? request.AvatarRoot : null;
+            GameObject closetRoot = request != null ? request.ClosetRoot : null;
             List<OutfitInput> userOutfits = NormalizeOutfits(request != null ? request.UserOutfits : null);
 
             if (!TryResolveType("nadena.dev.modular_avatar.core.ModularAvatarParameters", out _))
@@ -225,17 +228,23 @@ namespace YourName.AvatarClosetTool.Editor
                 return result;
             }
 
-            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
-            if (inventoryRoots.Count == 0 && userOutfits.Count == 0)
+            if (closetRoot == null)
             {
-                AddMessage(result.Messages, MessageSeverity.Error, "ClosetMenuRoot가 없습니다. 하이어라키 우클릭 [Inventory 기능 > 메뉴 지정]으로 먼저 지정하세요.");
+                AddMessage(result.Messages, MessageSeverity.Error, "Closet Root is missing. AvatarClosetWindow에서 Closet Root를 지정하세요.");
                 result.HasError = true;
                 return result;
             }
 
-            if (inventoryRoots.Count > 0)
+            if (!IsUnderAvatarRoot(avatarRoot, closetRoot) && closetRoot != avatarRoot)
             {
-                ValidateInventoryHierarchy(avatarRoot, inventoryRoots, result.Messages);
+                AddMessage(result.Messages, MessageSeverity.Error, "Closet Root must be under Avatar Root hierarchy.");
+            }
+
+            if (userOutfits.Count == 0)
+            {
+                AddMessage(result.Messages, MessageSeverity.Error, "Outfit 목록이 비어 있습니다. Closet Root를 스캔하세요.");
+                result.HasError = true;
+                return result;
             }
 
             for (int i = 0; i < userOutfits.Count; i++)
@@ -250,6 +259,12 @@ namespace YourName.AvatarClosetTool.Editor
                 if (!IsUnderAvatarRoot(avatarRoot, outfit.TargetGameObject))
                 {
                     AddMessage(result.Messages, MessageSeverity.Error, $"Outfit '{GetOutfitName(outfit)}' target is outside Avatar Root hierarchy.");
+                }
+
+                if (outfit.TargetGameObject.transform.parent != closetRoot.transform)
+                {
+                    AddMessage(result.Messages, MessageSeverity.Error,
+                        $"Outfit '{GetOutfitName(outfit)}' target must be a direct child of Closet Root.");
                 }
             }
 
@@ -316,28 +331,10 @@ namespace YourName.AvatarClosetTool.Editor
         {
             RepairResult result = new RepairResult();
             GameObject avatarRoot = request.AvatarRoot;
-            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
             List<OutfitInput> userOutfits = NormalizeOutfits(request.UserOutfits);
             AvatarClosetRegistrationStore store = FindRegistrationStore(avatarRoot);
             List<OutfitInput> storeOutfits = LoadOutfitsFromStore(store);
-
-            if (inventoryRoots.Count > 0)
-            {
-                result.EffectiveOutfits = BuildLegacyOutfitInputsFromInventory(inventoryRoots);
-            }
-
-            if (inventoryRoots.Count == 0 && storeOutfits.Count > 0 && userOutfits.Count > 0 && !AreOutfitSetsEquivalent(storeOutfits, userOutfits))
-            {
-                result.HasError = true;
-                AddMessage(result.Messages, MessageSeverity.Error,
-                    "Conflict detected between user input outfits and RegistrationStore metadata. Repair stopped. Resolve conflict before Apply.");
-                return result;
-            }
-
-            if (inventoryRoots.Count == 0)
-            {
-                result.EffectiveOutfits = storeOutfits.Count > 0 ? storeOutfits : userOutfits;
-            }
+            result.EffectiveOutfits = userOutfits.Count > 0 ? userOutfits : storeOutfits;
 
             if (result.EffectiveOutfits.Count == 0)
             {
@@ -366,14 +363,7 @@ namespace YourName.AvatarClosetTool.Editor
                 }
 
                 GameObject module = CreateModuleObject(avatarRoot);
-                if (inventoryRoots.Count > 0)
-                {
-                    RebuildModuleContentsFromInventory(module, avatarRoot, inventoryRoots);
-                }
-                else
-                {
-                    RebuildModuleContents(module, avatarRoot, result.EffectiveOutfits);
-                }
+                RebuildModuleContents(module, avatarRoot, result.EffectiveOutfits);
 
                 AvatarClosetRegistrationStore targetStore = store ?? CreateRegistrationStore(avatarRoot);
                 SaveOutfitsToStore(targetStore, avatarRoot, result.EffectiveOutfits);
@@ -402,7 +392,6 @@ namespace YourName.AvatarClosetTool.Editor
         public bool ApplyChanges(GameObject avatarRoot, IReadOnlyList<OutfitInput> effectiveOutfits, out List<PipelineMessage> messages)
         {
             messages = new List<PipelineMessage>();
-            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
 
             if (avatarRoot == null)
             {
@@ -410,9 +399,7 @@ namespace YourName.AvatarClosetTool.Editor
                 return false;
             }
 
-            List<OutfitInput> outfits = inventoryRoots.Count > 0
-                ? BuildLegacyOutfitInputsFromInventory(inventoryRoots)
-                : NormalizeOutfits(effectiveOutfits);
+            List<OutfitInput> outfits = NormalizeOutfits(effectiveOutfits);
             if (outfits.Count == 0)
             {
                 AddMessage(messages, MessageSeverity.Error, "Apply failed: no valid outfits to apply.");
@@ -450,14 +437,7 @@ namespace YourName.AvatarClosetTool.Editor
                     }
                 }
 
-                if (inventoryRoots.Count > 0)
-                {
-                    RebuildModuleContentsFromInventory(module, avatarRoot, inventoryRoots);
-                }
-                else
-                {
-                    RebuildModuleContents(module, avatarRoot, outfits);
-                }
+                RebuildModuleContents(module, avatarRoot, outfits);
 
                 AvatarClosetRegistrationStore store = FindRegistrationStore(avatarRoot) ?? CreateRegistrationStore(avatarRoot);
                 SaveOutfitsToStore(store, avatarRoot, outfits);
@@ -659,9 +639,7 @@ namespace YourName.AvatarClosetTool.Editor
             bool hasParameters = module.GetComponent(maTypes.ParametersType) != null;
             bool hasMergeAnimator = module.GetComponent(maTypes.MergeAnimatorType) != null;
             bool hasMenuItems = module.GetComponentsInChildren(maTypes.MenuItemType, true).Length > 0;
-            bool hasObjectToggles = module.GetComponentsInChildren(maTypes.ObjectToggleType, true).Length > 0;
-
-            if (!(hasParameters && hasMergeAnimator && hasMenuItems && hasObjectToggles))
+            if (!(hasParameters && hasMergeAnimator && hasMenuItems))
             {
                 return false;
             }
@@ -928,36 +906,38 @@ namespace YourName.AvatarClosetTool.Editor
             RemoveComponentIfExists(module, required.MergeAnimatorType);
 
             Component parametersComponent = EnsureComponentOrThrow(module, required.ParametersType, "MA Parameters");
-            EnsureComponentOrThrow(module, required.MergeAnimatorType, "MA MergeAnimator");
+            Component mergeAnimatorComponent = EnsureComponentOrThrow(module, required.MergeAnimatorType, "MA MergeAnimator");
 
-            List<GeneratedOutfitData> generated = new List<GeneratedOutfitData>(outfits.Count);
+            string setParameterName = DefaultSetParameterName;
+            ConfigureParameters(parametersComponent, new List<GeneratedParameterData>
+            {
+                GeneratedParameterData.Int(setParameterName, 0)
+            });
+
+            AnimatorController controller = EnsureSetAnimatorController(avatarRoot, outfits, setParameterName);
+            ConfigureMergeAnimator(mergeAnimatorComponent, controller);
+
+            GameObject menuRootNode = new GameObject("MenuRoot_Closet");
+            Undo.RegisterCreatedObjectUndo(menuRootNode, "Create Closet Menu Root");
+            Undo.SetTransformParent(menuRootNode.transform, module.transform, "Parent Closet Menu Root");
+
+            EnsureComponentOrThrow(menuRootNode, required.MenuInstallerType, "MA Menu Installer");
+            Component rootMenuItem = EnsureComponentOrThrow(menuRootNode, required.MenuItemType, "MA Menu Item");
+            ConfigureMenuItemAsSubmenu(rootMenuItem, "옷장");
+
             for (int i = 0; i < outfits.Count; i++)
             {
                 OutfitInput outfit = outfits[i];
                 string displayName = string.IsNullOrWhiteSpace(outfit.DisplayName) ? outfit.TargetGameObject.name : outfit.DisplayName.Trim();
-                string parameterKey = BuildParameterKey(avatarRoot, outfit, i);
 
-                GameObject outfitNode = new GameObject($"Outfit_{SanitizeName(displayName)}_{i + 1}");
-                Undo.RegisterCreatedObjectUndo(outfitNode, "Create Outfit Node");
-                Undo.SetTransformParent(outfitNode.transform, module.transform, "Parent Outfit Node");
+                GameObject buttonNode = new GameObject($"SetButton_{i}_{SanitizeName(displayName)}");
+                Undo.RegisterCreatedObjectUndo(buttonNode, "Create Set Button Node");
+                Undo.SetTransformParent(buttonNode.transform, menuRootNode.transform, "Parent Set Button Node");
 
-                Component toggleComponent = EnsureComponentOrThrow(outfitNode, required.ObjectToggleType, "MA Object Toggle");
-                ConfigureObjectToggle(toggleComponent, outfit.TargetGameObject, parameterKey);
-
-                Component menuItemComponent = EnsureComponentOrThrow(outfitNode, required.MenuItemType, "MA Menu Item");
-                ConfigureMenuItem(menuItemComponent, displayName, parameterKey);
-
-                generated.Add(new GeneratedOutfitData
-                {
-                    DisplayName = displayName,
-                    ParameterKey = parameterKey
-                });
+                Component buttonItem = EnsureComponentOrThrow(buttonNode, required.MenuItemType, "MA Menu Item");
+                ConfigureMenuItemAsSetButton(buttonItem, displayName, setParameterName, i);
             }
 
-            List<GeneratedParameterData> generatedParameters = generated
-                .Select(entry => GeneratedParameterData.Bool(entry.ParameterKey, false))
-                .ToList();
-            ConfigureParameters(parametersComponent, generatedParameters);
             EnsureModuleMetadata(module, outfits.Count);
         }
 
@@ -1127,12 +1107,6 @@ namespace YourName.AvatarClosetTool.Editor
             if (required.MenuItemType == null)
             {
                 missingType = "ModularAvatarMenuItem";
-                return false;
-            }
-
-            if (required.ObjectToggleType == null)
-            {
-                missingType = "ModularAvatarObjectToggle";
                 return false;
             }
 
@@ -1354,14 +1328,243 @@ namespace YourName.AvatarClosetTool.Editor
             serialized.ApplyModifiedPropertiesWithoutUndo();
             EditorUtility.SetDirty(menuItemComponent);
 
-            if (!submenuConfigured)
+            if (!submenuConfigured || !childrenConfigured)
             {
-                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} as submenu.");
+                Debug.LogWarning(
+                    $"[ClosetPipeline] Submenu auto-configuration was partial for {menuItemComponent.GetType().Name}. " +
+                    "Apply continues with MenuInstaller-based structure.");
+            }
+        }
+
+        private static void ConfigureMenuItemAsSetButton(Component menuItemComponent, string displayName, string parameterName, int setValue)
+        {
+            if (menuItemComponent == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Menu Item set button: component is null.");
             }
 
-            if (!childrenConfigured)
+            TrySetStringOrThrow(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName, "menu display name");
+
+            SerializedObject serialized = new SerializedObject(menuItemComponent);
+            bool parameterConfigured = TrySetStringByNameContains(serialized, "parameter", parameterName);
+            bool valueConfigured = TrySetNumericByNameContains(serialized, "value", setValue);
+            bool buttonConfigured = TrySetEnumPropertyByNameContains(serialized, "type", "button")
+                || TrySetEnumByNameContains(serialized, "button");
+
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(menuItemComponent);
+
+            if (!parameterConfigured)
             {
-                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} submenu source as children.");
+                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} button parameter.");
+            }
+
+            if (!valueConfigured)
+            {
+                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} button value.");
+            }
+
+            if (!buttonConfigured)
+            {
+                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} control type as button.");
+            }
+        }
+
+        private static void ConfigureMergeAnimator(Component mergeAnimatorComponent, AnimatorController controller)
+        {
+            if (mergeAnimatorComponent == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Merge Animator: component is null.");
+            }
+
+            if (controller == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Merge Animator: controller is null.");
+            }
+
+            TrySetObjectRefOrThrow(
+                mergeAnimatorComponent,
+                new[] { "animator", "Animator", "controller", "Controller", "animatorController" },
+                controller,
+                "animator controller");
+
+            SerializedObject serialized = new SerializedObject(mergeAnimatorComponent);
+            bool fxConfigured = TrySetEnumPropertyByNameContains(serialized, "layer", "fx")
+                || TrySetEnumByNameContains(serialized, "fx");
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(mergeAnimatorComponent);
+
+            if (!fxConfigured)
+            {
+                throw new InvalidOperationException($"Failed to configure {mergeAnimatorComponent.GetType().Name} layer type to FX.");
+            }
+        }
+
+        private static AnimatorController EnsureSetAnimatorController(GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits, string parameterName)
+        {
+            string folder = "Assets/AvatarClosetGenerated";
+            EnsureFolderExists(folder);
+
+            string keySeed = $"{GetRelativePath(avatarRoot.transform)}|{outfits.Count}";
+            string hash = Hash128.Compute(keySeed).ToString().Substring(0, 8).ToUpperInvariant();
+            string controllerPath = $"{folder}/{SanitizeName(avatarRoot.name)}_{hash}_ClosetFX.controller";
+
+            AnimatorController controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+            if (controller == null)
+            {
+                controller = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
+            }
+
+            RebuildAnimatorController(controller, controllerPath, avatarRoot, outfits, parameterName);
+            return controller;
+        }
+
+        private static void RebuildAnimatorController(
+            AnimatorController controller,
+            string controllerPath,
+            GameObject avatarRoot,
+            IReadOnlyList<OutfitInput> outfits,
+            string parameterName)
+        {
+            for (int i = controller.parameters.Length - 1; i >= 0; i--)
+            {
+                controller.RemoveParameter(controller.parameters[i]);
+            }
+            controller.AddParameter(parameterName, AnimatorControllerParameterType.Int);
+
+            AnimatorStateMachine stateMachine;
+            if (controller.layers.Length == 0)
+            {
+                stateMachine = new AnimatorStateMachine { name = "ClosetStateMachine" };
+                AssetDatabase.AddObjectToAsset(stateMachine, controllerPath);
+                controller.AddLayer(new AnimatorControllerLayer
+                {
+                    name = "ClosetSetLayer",
+                    defaultWeight = 1f,
+                    stateMachine = stateMachine
+                });
+            }
+            else
+            {
+                AnimatorControllerLayer layer = controller.layers[0];
+                stateMachine = layer.stateMachine;
+                layer.name = "ClosetSetLayer";
+                layer.defaultWeight = 1f;
+                controller.layers = new[] { layer };
+            }
+
+            ChildAnimatorState[] states = stateMachine.states;
+            for (int i = states.Length - 1; i >= 0; i--)
+            {
+                stateMachine.RemoveState(states[i].state);
+            }
+
+            AnimatorStateTransition[] anyTransitions = stateMachine.anyStateTransitions;
+            for (int i = anyTransitions.Length - 1; i >= 0; i--)
+            {
+                stateMachine.RemoveAnyStateTransition(anyTransitions[i]);
+            }
+
+            UnityEngine.Object[] assets = AssetDatabase.LoadAllAssetsAtPath(controllerPath);
+            for (int i = 0; i < assets.Length; i++)
+            {
+                AnimationClip clip = assets[i] as AnimationClip;
+                if (clip != null && clip.name.StartsWith("ACT_SET_", StringComparison.Ordinal))
+                {
+                    UnityEngine.Object.DestroyImmediate(clip, true);
+                }
+            }
+
+            for (int i = 0; i < outfits.Count; i++)
+            {
+                AnimationClip clip = CreateSetClip(avatarRoot, outfits, i);
+                clip.name = $"ACT_SET_{i}";
+                AssetDatabase.AddObjectToAsset(clip, controllerPath);
+
+                string stateName = $"Set_{i}_{SanitizeName(GetOutfitName(outfits[i]))}";
+                AnimatorState state = stateMachine.AddState(stateName);
+                state.motion = clip;
+                if (i == 0)
+                {
+                    stateMachine.defaultState = state;
+                }
+
+                AnimatorStateTransition transition = stateMachine.AddAnyStateTransition(state);
+                transition.hasExitTime = false;
+                transition.hasFixedDuration = true;
+                transition.duration = 0f;
+                transition.canTransitionToSelf = false;
+                transition.AddCondition(AnimatorConditionMode.Equals, i, parameterName);
+            }
+
+            EditorUtility.SetDirty(stateMachine);
+            EditorUtility.SetDirty(controller);
+            AssetDatabase.SaveAssets();
+        }
+
+        private static AnimationClip CreateSetClip(GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits, int activeIndex)
+        {
+            AnimationClip clip = new AnimationClip();
+            for (int i = 0; i < outfits.Count; i++)
+            {
+                GameObject target = outfits[i].TargetGameObject;
+                string relativePath = GetPathFromRoot(avatarRoot.transform, target.transform);
+                EditorCurveBinding binding = EditorCurveBinding.FloatCurve(relativePath, typeof(GameObject), "m_IsActive");
+                float value = i == activeIndex ? 1f : 0f;
+                AnimationCurve curve = AnimationCurve.Constant(0f, 0.01f, value);
+                AnimationUtility.SetEditorCurve(clip, binding, curve);
+            }
+
+            return clip;
+        }
+
+        private static string GetPathFromRoot(Transform root, Transform target)
+        {
+            if (root == null || target == null)
+            {
+                throw new InvalidOperationException("Failed to build animation path: root or target is null.");
+            }
+
+            if (root == target)
+            {
+                return string.Empty;
+            }
+
+            List<string> path = new List<string>();
+            Transform current = target;
+            while (current != null && current != root)
+            {
+                path.Add(current.name);
+                current = current.parent;
+            }
+
+            if (current != root)
+            {
+                throw new InvalidOperationException($"Target '{target.name}' is outside Avatar Root.");
+            }
+
+            path.Reverse();
+            return string.Join("/", path);
+        }
+
+        private static void EnsureFolderExists(string folderPath)
+        {
+            if (AssetDatabase.IsValidFolder(folderPath))
+            {
+                return;
+            }
+
+            string[] parts = folderPath.Split('/');
+            string current = parts[0];
+            for (int i = 1; i < parts.Length; i++)
+            {
+                string next = $"{current}/{parts[i]}";
+                if (!AssetDatabase.IsValidFolder(next))
+                {
+                    AssetDatabase.CreateFolder(current, parts[i]);
+                }
+
+                current = next;
             }
         }
 
@@ -1586,6 +1789,96 @@ namespace YourName.AvatarClosetTool.Editor
 
                 iterator.boolValue = value;
                 return true;
+            }
+
+            return false;
+        }
+
+        private static bool TrySetStringByNameContains(SerializedObject serialized, string nameToken, string value)
+        {
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.String)
+                {
+                    continue;
+                }
+
+                if (!iterator.name.ToLowerInvariant().Contains(nameToken.ToLowerInvariant()))
+                {
+                    continue;
+                }
+
+                iterator.stringValue = value;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TrySetNumericByNameContains(SerializedObject serialized, string nameToken, int value)
+        {
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (!iterator.name.ToLowerInvariant().Contains(nameToken.ToLowerInvariant()))
+                {
+                    continue;
+                }
+
+                if (iterator.propertyType == SerializedPropertyType.Integer)
+                {
+                    iterator.intValue = value;
+                    return true;
+                }
+
+                if (iterator.propertyType == SerializedPropertyType.Float)
+                {
+                    iterator.floatValue = value;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TrySetEnumPropertyByNameContains(SerializedObject serialized, string propertyNameToken, string enumValueToken)
+        {
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.Enum)
+                {
+                    continue;
+                }
+
+                if (!iterator.name.ToLowerInvariant().Contains(propertyNameToken.ToLowerInvariant()))
+                {
+                    continue;
+                }
+
+                string[] names = iterator.enumDisplayNames;
+                if (names == null || names.Length == 0)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < names.Length; i++)
+                {
+                    if (!names[i].ToLowerInvariant().Contains(enumValueToken.ToLowerInvariant()))
+                    {
+                        continue;
+                    }
+
+                    iterator.enumValueIndex = i;
+                    return true;
+                }
             }
 
             return false;

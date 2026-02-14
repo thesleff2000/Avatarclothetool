@@ -14,10 +14,10 @@ namespace YourName.AvatarClosetTool.Editor
         {
             public string DisplayName = string.Empty;
             public GameObject TargetGameObject;
-            public string OptionalGroupName = string.Empty;
         }
 
         private GameObject _avatarRoot;
+        private GameObject _closetRoot;
         [SerializeField] private List<OutfitEntry> _outfits = new List<OutfitEntry>();
         private readonly List<ClosetPipeline.PipelineMessage> _messages = new List<ClosetPipeline.PipelineMessage>();
         private string _summary = "Press Apply to run pipeline.";
@@ -50,6 +50,21 @@ namespace YourName.AvatarClosetTool.Editor
             }
 
             EditorGUILayout.Space(8f);
+            _closetRoot = (GameObject)EditorGUILayout.ObjectField(
+                "Closet Root",
+                _closetRoot,
+                typeof(GameObject),
+                true);
+
+            using (new EditorGUI.DisabledScope(_avatarRoot == null || _closetRoot == null))
+            {
+                if (GUILayout.Button("Scan From Closet Root"))
+                {
+                    ScanFromClosetRoot();
+                }
+            }
+
+            EditorGUILayout.Space(8f);
             EditorGUILayout.LabelField("Outfits", EditorStyles.boldLabel);
             DrawOutfitList();
 
@@ -70,33 +85,9 @@ namespace YourName.AvatarClosetTool.Editor
                 using (new EditorGUILayout.VerticalScope("box"))
                 {
                     EditorGUILayout.LabelField($"Outfit #{i + 1}", EditorStyles.boldLabel);
-                    entry.DisplayName = EditorGUILayout.TextField("Display Name", entry.DisplayName);
-                    entry.TargetGameObject = (GameObject)EditorGUILayout.ObjectField(
-                        "Target GameObject",
-                        entry.TargetGameObject,
-                        typeof(GameObject),
-                        true);
-                    entry.OptionalGroupName = EditorGUILayout.TextField("Optional Group Name", entry.OptionalGroupName);
-
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        GUILayout.FlexibleSpace();
-                        if (GUILayout.Button("Delete", GUILayout.Width(80f)))
-                        {
-                            Undo.RecordObject(this, "Delete Outfit Entry");
-                            _outfits.RemoveAt(i);
-                            EditorUtility.SetDirty(this);
-                            GUIUtility.ExitGUI();
-                        }
-                    }
+                    EditorGUILayout.LabelField("Display Name", string.IsNullOrWhiteSpace(entry.DisplayName) ? "<empty>" : entry.DisplayName);
+                    EditorGUILayout.ObjectField("Target GameObject", entry.TargetGameObject, typeof(GameObject), true);
                 }
-            }
-
-            if (GUILayout.Button("Add Outfit"))
-            {
-                Undo.RecordObject(this, "Add Outfit Entry");
-                _outfits.Add(new OutfitEntry());
-                EditorUtility.SetDirty(this);
             }
         }
 
@@ -119,12 +110,12 @@ namespace YourName.AvatarClosetTool.Editor
             ClosetPipeline.PipelineRequest request = new ClosetPipeline.PipelineRequest
             {
                 AvatarRoot = _avatarRoot,
+                ClosetRoot = _closetRoot,
                 UserOutfits = _outfits
                     .Select(entry => new ClosetPipeline.OutfitInput
                     {
                         DisplayName = entry.DisplayName,
-                        TargetGameObject = entry.TargetGameObject,
-                        OptionalGroupName = entry.OptionalGroupName
+                        TargetGameObject = entry.TargetGameObject
                     })
                     .ToList()
             };
@@ -185,8 +176,7 @@ namespace YourName.AvatarClosetTool.Editor
                         loaded.Add(new OutfitEntry
                         {
                             DisplayName = record.DisplayName ?? string.Empty,
-                            TargetGameObject = record.TargetGameObject,
-                            OptionalGroupName = record.OptionalGroupName ?? string.Empty
+                            TargetGameObject = record.TargetGameObject
                         });
                     }
                 }
@@ -195,6 +185,36 @@ namespace YourName.AvatarClosetTool.Editor
             Undo.RecordObject(this, "Load Outfit Entries");
             _outfits = loaded;
             EditorUtility.SetDirty(this);
+        }
+
+        private void ScanFromClosetRoot()
+        {
+            if (_avatarRoot == null || _closetRoot == null)
+            {
+                return;
+            }
+
+            if (!_closetRoot.transform.IsChildOf(_avatarRoot.transform) && _closetRoot != _avatarRoot)
+            {
+                EditorUtility.DisplayDialog("Avatar Closet", "Closet Root는 Avatar Root 하위여야 합니다.", "OK");
+                return;
+            }
+
+            List<OutfitEntry> scanned = new List<OutfitEntry>();
+            for (int i = 0; i < _closetRoot.transform.childCount; i++)
+            {
+                Transform child = _closetRoot.transform.GetChild(i);
+                scanned.Add(new OutfitEntry
+                {
+                    DisplayName = child.name,
+                    TargetGameObject = child.gameObject
+                });
+            }
+
+            Undo.RecordObject(this, "Scan Outfit Entries");
+            _outfits = scanned;
+            EditorUtility.SetDirty(this);
+            Repaint();
         }
     }
 }

@@ -1,22 +1,20 @@
-# QuickStart Sample (3-minute flow)
+# QuickStart Sample (3-minute GUI flow)
 
 This sample describes the fastest MVP check in a fresh scene.
 
 ## Hierarchy Example
 
 - `AvatarRoot`
-  - `ClosetMenu` (assign `Inventory 기능/메뉴 지정`)
-    - `JacketSet` (assign `Inventory 기능/옷 지정`)
-      - `Hood` (assign `Inventory 기능/옷 파츠 지정`)
-    - `CasualSet` (assign `Inventory 기능/옷 지정`)
-      - `Sleeve` (assign `Inventory 기능/옷 파츠 지정`)
+  - `ClosetRoot`
+    - `JacketSet`
+    - `CasualSet`
 
 ## Verify
 
 1. Open `Tools/Avatar Closet/Open Window`.
-2. Set Avatar Root = `AvatarRoot`.
-3. Click `Apply`.
-4. Confirm `AvatarRoot/AvatarClosetModule` exists.
-5. Click `Apply` again and confirm no duplicate module is created.
+2. Set Avatar Root = `AvatarRoot`, Closet Root = `ClosetRoot`.
+3. Click `Scan From Closet Root`.
+4. Click `Apply`.
+5. Confirm `AvatarRoot/AvatarClosetModule` exists and no duplicate is created on second Apply.
 
 If MA is missing, the pipeline stops at Validate with a clear installation message.
