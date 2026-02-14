@@ -1,0 +1,22 @@
+{
+  "name": "com.yourname.avatar-closet-tool.Editor.Tests",
+  "rootNamespace": "YourName.AvatarClosetTool.Tests",
+  "references": [
+    "com.yourname.avatar-closet-tool.Editor",
+    "com.yourname.avatar-closet-tool.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

@@ -15,6 +15,9 @@ namespace YourName.AvatarClosetTool.Editor
         private const string RegistrationStoreObjectName = "AvatarClosetRegistrationStore";
         private const int CurrentModuleSchemaVersion = 1;
         private const string ExpectedModuleMarker = "avatar-closet-module-v1";
+        private const string DefaultSetParameterName = "ACT_SET";
+        private const string MaInstallGuidance =
+            "Modular Avatar가 설치되어 있어야 합니다. VCC 또는 GitHub에서 설치 후 다시 시도하세요.";
 
         private static readonly string[] MaParametersTypeNames =
         {
@@ -40,6 +43,14 @@ namespace YourName.AvatarClosetTool.Editor
             "ModularAvatarMergeAnimator"
         };
 
+        private sealed class MaRequiredTypes
+        {
+            public Type ParametersType;
+            public Type MenuItemType;
+            public Type ObjectToggleType;
+            public Type MergeAnimatorType;
+        }
+
         public enum MessageSeverity
         {
             Info,
@@ -58,6 +69,28 @@ namespace YourName.AvatarClosetTool.Editor
             public string DisplayName = string.Empty;
             public GameObject TargetGameObject;
             public string OptionalGroupName = string.Empty;
+        }
+
+        private sealed class InventoryPart
+        {
+            public ClosetOutfitPart Component;
+            public string ParameterName;
+        }
+
+        private sealed class InventorySet
+        {
+            public ClosetOutfitSet Component;
+            public string DisplayName;
+            public List<InventoryPart> Parts = new List<InventoryPart>();
+        }
+
+        private sealed class InventoryRoot
+        {
+            public ClosetMenuRoot Component;
+            public string DisplayName;
+            public string NamespacePrefix;
+            public string SetParameterName;
+            public List<InventorySet> Sets = new List<InventorySet>();
         }
 
         public sealed class PipelineRequest
@@ -91,6 +124,11 @@ namespace YourName.AvatarClosetTool.Editor
             public List<PipelineMessage> Messages = new List<PipelineMessage>();
         }
 
+        // NeedsRepair=true conditions:
+        // 1) Duplicate AvatarClosetModule objects exist under AvatarRoot.
+        // 2) Existing module metadata is missing, schema is outdated, or marker mismatches.
+        // 3) Existing module structure is not as expected (missing MA core components).
+        // 4) Module exists but RegistrationStore metadata is missing or corrupted.
         public PipelineResult RunPipeline(PipelineRequest request, Action<string> statusCallback)
         {
             PipelineResult result = new PipelineResult();
@@ -99,9 +137,9 @@ namespace YourName.AvatarClosetTool.Editor
             Debug.Log("[ClosetPipeline] Step 1/3 ValidateOnly");
             ValidationResult validation = ValidateOnly(request);
             result.Messages.AddRange(validation.Messages);
-            if (validation.HasError)
+            result.HasError = validation.HasError;
+            if (result.HasError)
             {
-                result.HasError = true;
                 result.FinalStatus = "Done";
                 result.Summary = "Validation failed. Apply was blocked.";
                 SetStatus(result.FinalStatus, statusCallback);
@@ -112,22 +150,24 @@ namespace YourName.AvatarClosetTool.Editor
             Debug.Log("[ClosetPipeline] Step 2/3 RepairIfNeeded");
             RepairResult repair = RepairIfNeeded(request, validation);
             result.Messages.AddRange(repair.Messages);
-            if (repair.HasError)
+            result.HasError = validation.HasError || repair.HasError;
+            if (result.HasError)
             {
-                result.HasError = true;
                 result.FinalStatus = "Done";
                 result.Summary = "Repair failed. Apply was blocked.";
                 SetStatus(result.FinalStatus, statusCallback);
                 return result;
             }
 
+            Debug.Assert(!result.HasError, "[ClosetPipeline] ApplyChanges must never be called when HasError is true.");
             SetStatus("Applying...", statusCallback);
             Debug.Log("[ClosetPipeline] Step 3/3 ApplyChanges");
             List<PipelineMessage> applyMessages;
             bool applied = ApplyChanges(request.AvatarRoot, repair.EffectiveOutfits, out applyMessages);
             result.Messages.AddRange(applyMessages);
             result.Applied = applied;
-            result.HasError = applyMessages.Any(m => m.Severity == MessageSeverity.Error);
+            bool applyHasError = applyMessages.Any(m => m.Severity == MessageSeverity.Error);
+            result.HasError = validation.HasError || repair.HasError || applyHasError;
 
             result.FinalStatus = "Done";
             result.Summary = BuildSummary(result.Messages, result.Applied, result.HasError);
@@ -141,6 +181,36 @@ namespace YourName.AvatarClosetTool.Editor
             GameObject avatarRoot = request != null ? request.AvatarRoot : null;
             List<OutfitInput> userOutfits = NormalizeOutfits(request != null ? request.UserOutfits : null);
 
+            if (!TryResolveType("nadena.dev.modular_avatar.core.ModularAvatarParameters", out _))
+            {
+                AddMessage(
+                    result.Messages,
+                    MessageSeverity.Error,
+                    $"{MaInstallGuidance} 누락 타입: nadena.dev.modular_avatar.core.ModularAvatarParameters");
+                result.HasError = true;
+                return result;
+            }
+
+            if (!TryResolveType("nadena.dev.modular_avatar.core.ModularAvatarMenuItem", out _))
+            {
+                AddMessage(
+                    result.Messages,
+                    MessageSeverity.Error,
+                    $"{MaInstallGuidance} 누락 타입: nadena.dev.modular_avatar.core.ModularAvatarMenuItem");
+                result.HasError = true;
+                return result;
+            }
+
+            if (!TryGetRequiredMaTypes(out MaRequiredTypes maTypes, out string missingType))
+            {
+                AddMessage(
+                    result.Messages,
+                    MessageSeverity.Error,
+                    $"{MaInstallGuidance} 누락 타입: {missingType}");
+                result.HasError = true;
+                return result;
+            }
+
             if (avatarRoot == null)
             {
                 AddMessage(result.Messages, MessageSeverity.Error, "Avatar Root is missing.");
@@ -148,9 +218,17 @@ namespace YourName.AvatarClosetTool.Editor
                 return result;
             }
 
-            if (userOutfits.Count == 0)
+            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
+            if (inventoryRoots.Count == 0 && userOutfits.Count == 0)
             {
-                AddMessage(result.Messages, MessageSeverity.Warning, "User outfit list is empty. RegistrationStore data will be used if available.");
+                AddMessage(result.Messages, MessageSeverity.Error, "ClosetMenuRoot가 없습니다. 하이어라키 우클릭 [Inventory 기능 > 메뉴 지정]으로 먼저 지정하세요.");
+                result.HasError = true;
+                return result;
+            }
+
+            if (inventoryRoots.Count > 0)
+            {
+                ValidateInventoryHierarchy(avatarRoot, inventoryRoots, result.Messages);
             }
 
             for (int i = 0; i < userOutfits.Count; i++)
@@ -203,7 +281,7 @@ namespace YourName.AvatarClosetTool.Editor
                     }
                 }
 
-                if (!HasExpectedStructure(primaryModule))
+                if (!HasExpectedStructure(primaryModule, maTypes))
                 {
                     result.NeedsRepair = true;
                     AddMessage(result.Messages, MessageSeverity.Warning, "Module structure is not as expected. Repair is required.");
@@ -231,11 +309,17 @@ namespace YourName.AvatarClosetTool.Editor
         {
             RepairResult result = new RepairResult();
             GameObject avatarRoot = request.AvatarRoot;
+            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
             List<OutfitInput> userOutfits = NormalizeOutfits(request.UserOutfits);
             AvatarClosetRegistrationStore store = FindRegistrationStore(avatarRoot);
             List<OutfitInput> storeOutfits = LoadOutfitsFromStore(store);
 
-            if (storeOutfits.Count > 0 && userOutfits.Count > 0 && !AreOutfitSetsEquivalent(storeOutfits, userOutfits))
+            if (inventoryRoots.Count > 0)
+            {
+                result.EffectiveOutfits = BuildLegacyOutfitInputsFromInventory(inventoryRoots);
+            }
+
+            if (inventoryRoots.Count == 0 && storeOutfits.Count > 0 && userOutfits.Count > 0 && !AreOutfitSetsEquivalent(storeOutfits, userOutfits))
             {
                 result.HasError = true;
                 AddMessage(result.Messages, MessageSeverity.Error,
@@ -243,7 +327,11 @@ namespace YourName.AvatarClosetTool.Editor
                 return result;
             }
 
-            result.EffectiveOutfits = storeOutfits.Count > 0 ? storeOutfits : userOutfits;
+            if (inventoryRoots.Count == 0)
+            {
+                result.EffectiveOutfits = storeOutfits.Count > 0 ? storeOutfits : userOutfits;
+            }
+
             if (result.EffectiveOutfits.Count == 0)
             {
                 result.HasError = true;
@@ -271,7 +359,14 @@ namespace YourName.AvatarClosetTool.Editor
                 }
 
                 GameObject module = CreateModuleObject(avatarRoot);
-                RebuildModuleContents(module, avatarRoot, result.EffectiveOutfits);
+                if (inventoryRoots.Count > 0)
+                {
+                    RebuildModuleContentsFromInventory(module, avatarRoot, inventoryRoots);
+                }
+                else
+                {
+                    RebuildModuleContents(module, avatarRoot, result.EffectiveOutfits);
+                }
 
                 AvatarClosetRegistrationStore targetStore = store ?? CreateRegistrationStore(avatarRoot);
                 SaveOutfitsToStore(targetStore, avatarRoot, result.EffectiveOutfits);
@@ -300,6 +395,7 @@ namespace YourName.AvatarClosetTool.Editor
         public bool ApplyChanges(GameObject avatarRoot, IReadOnlyList<OutfitInput> effectiveOutfits, out List<PipelineMessage> messages)
         {
             messages = new List<PipelineMessage>();
+            List<InventoryRoot> inventoryRoots = CollectInventoryRoots(avatarRoot);
 
             if (avatarRoot == null)
             {
@@ -307,7 +403,9 @@ namespace YourName.AvatarClosetTool.Editor
                 return false;
             }
 
-            List<OutfitInput> outfits = NormalizeOutfits(effectiveOutfits);
+            List<OutfitInput> outfits = inventoryRoots.Count > 0
+                ? BuildLegacyOutfitInputsFromInventory(inventoryRoots)
+                : NormalizeOutfits(effectiveOutfits);
             if (outfits.Count == 0)
             {
                 AddMessage(messages, MessageSeverity.Error, "Apply failed: no valid outfits to apply.");
@@ -345,7 +443,14 @@ namespace YourName.AvatarClosetTool.Editor
                     }
                 }
 
-                RebuildModuleContents(module, avatarRoot, outfits);
+                if (inventoryRoots.Count > 0)
+                {
+                    RebuildModuleContentsFromInventory(module, avatarRoot, inventoryRoots);
+                }
+                else
+                {
+                    RebuildModuleContents(module, avatarRoot, outfits);
+                }
 
                 AvatarClosetRegistrationStore store = FindRegistrationStore(avatarRoot) ?? CreateRegistrationStore(avatarRoot);
                 SaveOutfitsToStore(store, avatarRoot, outfits);
@@ -382,22 +487,172 @@ namespace YourName.AvatarClosetTool.Editor
                 !string.IsNullOrWhiteSpace(record.ParameterKey));
         }
 
-        private static bool HasExpectedStructure(GameObject module)
+        private static List<InventoryRoot> CollectInventoryRoots(GameObject avatarRoot)
+        {
+            List<InventoryRoot> roots = new List<InventoryRoot>();
+            if (avatarRoot == null)
+            {
+                return roots;
+            }
+
+            ClosetMenuRoot[] menuRoots = avatarRoot.GetComponentsInChildren<ClosetMenuRoot>(true);
+            for (int i = 0; i < menuRoots.Length; i++)
+            {
+                ClosetMenuRoot menuRoot = menuRoots[i];
+                if (menuRoot == null)
+                {
+                    continue;
+                }
+
+                InventoryRoot root = new InventoryRoot
+                {
+                    Component = menuRoot,
+                    DisplayName = menuRoot.EffectiveDisplayName,
+                    NamespacePrefix = menuRoot.NamespacePrefix ?? string.Empty
+                };
+                root.SetParameterName = string.IsNullOrWhiteSpace(root.NamespacePrefix)
+                    ? DefaultSetParameterName
+                    : $"{root.NamespacePrefix}_{DefaultSetParameterName}";
+
+                ClosetOutfitSet[] sets = menuRoot.GetComponentsInChildren<ClosetOutfitSet>(true);
+                for (int s = 0; s < sets.Length; s++)
+                {
+                    ClosetOutfitSet set = sets[s];
+                    if (set == null || set.transform == menuRoot.transform)
+                    {
+                        continue;
+                    }
+
+                    InventorySet inventorySet = new InventorySet
+                    {
+                        Component = set,
+                        DisplayName = set.EffectiveDisplayName
+                    };
+
+                    ClosetOutfitPart[] parts = set.GetComponentsInChildren<ClosetOutfitPart>(true);
+                    for (int p = 0; p < parts.Length; p++)
+                    {
+                        ClosetOutfitPart part = parts[p];
+                        if (part == null)
+                        {
+                            continue;
+                        }
+
+                        InventoryPart inventoryPart = new InventoryPart
+                        {
+                            Component = part,
+                            ParameterName = BuildPartParameterName(root, set, part)
+                        };
+                        inventorySet.Parts.Add(inventoryPart);
+                    }
+
+                    root.Sets.Add(inventorySet);
+                }
+
+                roots.Add(root);
+            }
+
+            return roots;
+        }
+
+        private static void ValidateInventoryHierarchy(GameObject avatarRoot, IReadOnlyList<InventoryRoot> roots, List<PipelineMessage> messages)
+        {
+            if (roots.Count == 0)
+            {
+                return;
+            }
+
+            ClosetOutfitSet[] allSets = avatarRoot.GetComponentsInChildren<ClosetOutfitSet>(true);
+            for (int i = 0; i < allSets.Length; i++)
+            {
+                ClosetOutfitSet set = allSets[i];
+                if (set == null)
+                {
+                    continue;
+                }
+
+                ClosetMenuRoot parentRoot = set.GetComponentInParent<ClosetMenuRoot>(true);
+                if (parentRoot == null || !set.transform.IsChildOf(parentRoot.transform))
+                {
+                    AddMessage(messages, MessageSeverity.Error, $"OutfitSet '{set.gameObject.name}' is not under ClosetMenuRoot.");
+                }
+            }
+
+            ClosetOutfitPart[] allParts = avatarRoot.GetComponentsInChildren<ClosetOutfitPart>(true);
+            for (int i = 0; i < allParts.Length; i++)
+            {
+                ClosetOutfitPart part = allParts[i];
+                if (part == null)
+                {
+                    continue;
+                }
+
+                ClosetOutfitSet parentSet = part.GetComponentInParent<ClosetOutfitSet>(true);
+                if (parentSet == null || !part.transform.IsChildOf(parentSet.transform))
+                {
+                    AddMessage(messages, MessageSeverity.Error, $"OutfitPart '{part.gameObject.name}' is not under ClosetOutfitSet.");
+                }
+            }
+
+            for (int i = 0; i < roots.Count; i++)
+            {
+                InventoryRoot root = roots[i];
+                if (root.Sets.Count == 0)
+                {
+                    AddMessage(messages, MessageSeverity.Warning, $"ClosetMenuRoot '{root.DisplayName}' has no OutfitSet.");
+                    continue;
+                }
+
+                Dictionary<int, int> indexCounts = new Dictionary<int, int>();
+                for (int s = 0; s < root.Sets.Count; s++)
+                {
+                    int index = root.Sets[s].Component.SetIndex;
+                    indexCounts.TryGetValue(index, out int count);
+                    indexCounts[index] = count + 1;
+                }
+
+                foreach (KeyValuePair<int, int> pair in indexCounts)
+                {
+                    if (pair.Value > 1)
+                    {
+                        AddMessage(messages, MessageSeverity.Error, $"ClosetMenuRoot '{root.DisplayName}' has duplicate setIndex '{pair.Key}'.");
+                    }
+                }
+            }
+        }
+
+        private static List<OutfitInput> BuildLegacyOutfitInputsFromInventory(IReadOnlyList<InventoryRoot> roots)
+        {
+            List<OutfitInput> outfits = new List<OutfitInput>();
+            for (int i = 0; i < roots.Count; i++)
+            {
+                InventoryRoot root = roots[i];
+                for (int s = 0; s < root.Sets.Count; s++)
+                {
+                    InventorySet set = root.Sets[s];
+                    outfits.Add(new OutfitInput
+                    {
+                        DisplayName = set.DisplayName,
+                        TargetGameObject = set.Component.gameObject,
+                        OptionalGroupName = root.DisplayName
+                    });
+                }
+            }
+
+            return outfits;
+        }
+
+        private static bool HasExpectedStructure(GameObject module, MaRequiredTypes maTypes)
         {
             if (module == null)
             {
                 return false;
             }
 
-            Type parametersType = ResolveType(MaParametersTypeNames);
-            Type mergeAnimatorType = ResolveType(MaMergeAnimatorTypeNames);
-            Type menuItemType = ResolveType(MaMenuItemTypeNames);
-            Type objectToggleType = ResolveType(MaObjectToggleTypeNames);
-
-            bool hasParameters = parametersType == null || module.GetComponent(parametersType) != null;
-            bool hasMergeAnimator = mergeAnimatorType == null || module.GetComponent(mergeAnimatorType) != null;
-            bool hasMenuItems = menuItemType == null || module.GetComponentsInChildren(menuItemType, true).Length > 0;
-            bool hasObjectToggles = objectToggleType == null || module.GetComponentsInChildren(objectToggleType, true).Length > 0;
+            bool hasParameters = module.GetComponent(maTypes.ParametersType) != null;
+            bool hasMergeAnimator = module.GetComponent(maTypes.MergeAnimatorType) != null;
+            bool hasMenuItems = module.GetComponentsInChildren(maTypes.MenuItemType, true).Length > 0;
+            bool hasObjectToggles = module.GetComponentsInChildren(maTypes.ObjectToggleType, true).Length > 0;
 
             return hasParameters && hasMergeAnimator && hasMenuItems && hasObjectToggles;
         }
@@ -620,17 +875,14 @@ namespace YourName.AvatarClosetTool.Editor
 
         private static void RebuildModuleContents(GameObject module, GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits)
         {
+            MaRequiredTypes required = GetRequiredMaTypesOrThrow();
+
             ClearModuleChildren(module);
-            RemoveComponentIfExists(module, ResolveType(MaParametersTypeNames));
-            RemoveComponentIfExists(module, ResolveType(MaMergeAnimatorTypeNames));
+            RemoveComponentIfExists(module, required.ParametersType);
+            RemoveComponentIfExists(module, required.MergeAnimatorType);
 
-            Type parametersType = ResolveType(MaParametersTypeNames);
-            Type mergeAnimatorType = ResolveType(MaMergeAnimatorTypeNames);
-            Type objectToggleType = ResolveType(MaObjectToggleTypeNames);
-            Type menuItemType = ResolveType(MaMenuItemTypeNames);
-
-            Component parametersComponent = EnsureComponent(module, parametersType);
-            EnsureComponent(module, mergeAnimatorType);
+            Component parametersComponent = EnsureComponentOrThrow(module, required.ParametersType, "MA Parameters");
+            EnsureComponentOrThrow(module, required.MergeAnimatorType, "MA MergeAnimator");
 
             List<GeneratedOutfitData> generated = new List<GeneratedOutfitData>(outfits.Count);
             for (int i = 0; i < outfits.Count; i++)
@@ -643,10 +895,10 @@ namespace YourName.AvatarClosetTool.Editor
                 Undo.RegisterCreatedObjectUndo(outfitNode, "Create Outfit Node");
                 Undo.SetTransformParent(outfitNode.transform, module.transform, "Parent Outfit Node");
 
-                Component toggleComponent = EnsureComponent(outfitNode, objectToggleType);
+                Component toggleComponent = EnsureComponentOrThrow(outfitNode, required.ObjectToggleType, "MA Object Toggle");
                 ConfigureObjectToggle(toggleComponent, outfit.TargetGameObject, parameterKey);
 
-                Component menuItemComponent = EnsureComponent(outfitNode, menuItemType);
+                Component menuItemComponent = EnsureComponentOrThrow(outfitNode, required.MenuItemType, "MA Menu Item");
                 ConfigureMenuItem(menuItemComponent, displayName, parameterKey);
 
                 generated.Add(new GeneratedOutfitData
@@ -656,8 +908,81 @@ namespace YourName.AvatarClosetTool.Editor
                 });
             }
 
-            ConfigureParameters(parametersComponent, generated);
+            List<GeneratedParameterData> generatedParameters = generated
+                .Select(entry => GeneratedParameterData.Bool(entry.ParameterKey, false))
+                .ToList();
+            ConfigureParameters(parametersComponent, generatedParameters);
             EnsureModuleMetadata(module, outfits.Count);
+        }
+
+        private static void RebuildModuleContentsFromInventory(GameObject module, GameObject avatarRoot, IReadOnlyList<InventoryRoot> roots)
+        {
+            MaRequiredTypes required = GetRequiredMaTypesOrThrow();
+
+            ClearModuleChildren(module);
+            RemoveComponentIfExists(module, required.ParametersType);
+            RemoveComponentIfExists(module, required.MergeAnimatorType);
+
+            Component parametersComponent = EnsureComponentOrThrow(module, required.ParametersType, "MA Parameters");
+            EnsureComponentOrThrow(module, required.MergeAnimatorType, "MA MergeAnimator");
+
+            List<GeneratedParameterData> generatedParameters = new List<GeneratedParameterData>();
+
+            for (int r = 0; r < roots.Count; r++)
+            {
+                InventoryRoot root = roots[r];
+                generatedParameters.Add(GeneratedParameterData.Int(root.SetParameterName, 0));
+
+                GameObject rootNode = new GameObject($"MenuRoot_{SanitizeName(root.DisplayName)}");
+                Undo.RegisterCreatedObjectUndo(rootNode, "Create Menu Root Node");
+                Undo.SetTransformParent(rootNode.transform, module.transform, "Parent Menu Root Node");
+
+                for (int s = 0; s < root.Sets.Count; s++)
+                {
+                    InventorySet set = root.Sets[s];
+                    GameObject setNode = new GameObject($"Set_{set.Component.SetIndex}_{SanitizeName(set.DisplayName)}");
+                    Undo.RegisterCreatedObjectUndo(setNode, "Create Outfit Set Node");
+                    Undo.SetTransformParent(setNode.transform, rootNode.transform, "Parent Outfit Set Node");
+
+                    string setToggleParam = $"{root.SetParameterName}_IS_{set.Component.SetIndex}";
+                    generatedParameters.Add(GeneratedParameterData.Bool(setToggleParam, set.Component.DefaultOn));
+
+                    Component setToggle = EnsureComponentOrThrow(setNode, required.ObjectToggleType, "MA Object Toggle");
+                    ConfigureObjectToggle(setToggle, set.Component.gameObject, setToggleParam);
+
+                    Component setMenuItem = EnsureComponentOrThrow(setNode, required.MenuItemType, "MA Menu Item");
+                    ConfigureMenuItem(setMenuItem, set.DisplayName, setToggleParam);
+
+                    if (set.Parts.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    GameObject partsMenuNode = new GameObject($"Parts_{SanitizeName(set.DisplayName)}");
+                    Undo.RegisterCreatedObjectUndo(partsMenuNode, "Create Parts Menu Node");
+                    Undo.SetTransformParent(partsMenuNode.transform, setNode.transform, "Parent Parts Menu Node");
+
+                    for (int p = 0; p < set.Parts.Count; p++)
+                    {
+                        InventoryPart part = set.Parts[p];
+                        string partName = part.Component.EffectiveDisplayName;
+                        generatedParameters.Add(GeneratedParameterData.Bool(part.ParameterName, part.Component.DefaultOn));
+
+                        GameObject partNode = new GameObject($"Part_{SanitizeName(partName)}_{p + 1}");
+                        Undo.RegisterCreatedObjectUndo(partNode, "Create Part Node");
+                        Undo.SetTransformParent(partNode.transform, partsMenuNode.transform, "Parent Part Node");
+
+                        Component partToggle = EnsureComponentOrThrow(partNode, required.ObjectToggleType, "MA Object Toggle");
+                        ConfigureObjectToggle(partToggle, part.Component.gameObject, part.ParameterName);
+
+                        Component partMenuItem = EnsureComponentOrThrow(partNode, required.MenuItemType, "MA Menu Item");
+                        ConfigureMenuItem(partMenuItem, partName, part.ParameterName);
+                    }
+                }
+            }
+
+            ConfigureParameters(parametersComponent, generatedParameters);
+            EnsureModuleMetadata(module, generatedParameters.Count);
         }
 
         private static void EnsureModuleMetadata(GameObject module, int outfitCount)
@@ -706,6 +1031,87 @@ namespace YourName.AvatarClosetTool.Editor
 
             Component existing = target.GetComponent(componentType);
             return existing != null ? existing : Undo.AddComponent(target, componentType);
+        }
+
+        private static Component EnsureComponentOrThrow(GameObject target, Type componentType, string componentLabel)
+        {
+            Component component = EnsureComponent(target, componentType);
+            if (component == null)
+            {
+                throw new InvalidOperationException($"Failed to add required {componentLabel} component.");
+            }
+
+            return component;
+        }
+
+        private static MaRequiredTypes GetRequiredMaTypesOrThrow()
+        {
+            if (TryGetRequiredMaTypes(out MaRequiredTypes required, out string missingType))
+            {
+                return required;
+            }
+
+            throw new InvalidOperationException($"{MaInstallGuidance} 누락 타입: {missingType}");
+        }
+
+        private static bool TryGetRequiredMaTypes(out MaRequiredTypes required, out string missingType)
+        {
+            required = new MaRequiredTypes
+            {
+                ParametersType = ResolveType(MaParametersTypeNames),
+                MenuItemType = ResolveType(MaMenuItemTypeNames),
+                ObjectToggleType = ResolveType(MaObjectToggleTypeNames),
+                MergeAnimatorType = ResolveType(MaMergeAnimatorTypeNames)
+            };
+
+            if (required.ParametersType == null)
+            {
+                missingType = "ModularAvatarParameters";
+                return false;
+            }
+
+            if (required.MenuItemType == null)
+            {
+                missingType = "ModularAvatarMenuItem";
+                return false;
+            }
+
+            if (required.ObjectToggleType == null)
+            {
+                missingType = "ModularAvatarObjectToggle";
+                return false;
+            }
+
+            if (required.MergeAnimatorType == null)
+            {
+                missingType = "ModularAvatarMergeAnimator";
+                return false;
+            }
+
+            missingType = string.Empty;
+            return true;
+        }
+
+        private static bool TryResolveType(string typeName, out Type type)
+        {
+            type = Type.GetType(typeName, false);
+            if (type != null)
+            {
+                return true;
+            }
+
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (int i = 0; i < assemblies.Length; i++)
+            {
+                type = assemblies[i].GetType(typeName, false);
+                if (type != null)
+                {
+                    return true;
+                }
+            }
+
+            type = null;
+            return false;
         }
 
         private static Type ResolveType(IEnumerable<string> candidates)
@@ -832,13 +1238,13 @@ namespace YourName.AvatarClosetTool.Editor
         {
             if (toggleComponent == null)
             {
-                return;
+                throw new InvalidOperationException("Failed to configure MA Object Toggle: component is null.");
             }
 
-            TrySetObjectRef(toggleComponent, new[] { "targetObject", "TargetObject", "objectReference", "Object" }, targetObject);
-            TrySetString(toggleComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey);
-            TrySetBool(toggleComponent, new[] { "saved", "Saved", "isSaved" }, true);
-            TrySetBool(toggleComponent, new[] { "synced", "Synced", "isSynced", "networkSynced" }, true);
+            TrySetObjectRefOrThrow(toggleComponent, new[] { "targetObject", "TargetObject", "objectReference", "Object" }, targetObject, "target object");
+            TrySetStringOrThrow(toggleComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey, "parameter key");
+            TrySetBoolOrThrow(toggleComponent, new[] { "saved", "Saved", "isSaved" }, true, "saved flag");
+            TrySetBoolOrThrow(toggleComponent, new[] { "synced", "Synced", "isSynced", "networkSynced" }, true, "synced flag");
             EditorUtility.SetDirty(toggleComponent);
         }
 
@@ -846,43 +1252,44 @@ namespace YourName.AvatarClosetTool.Editor
         {
             if (menuItemComponent == null)
             {
-                return;
+                throw new InvalidOperationException("Failed to configure MA Menu Item: component is null.");
             }
 
-            TrySetString(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName);
-            TrySetString(menuItemComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey);
+            TrySetStringOrThrow(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName, "menu display name");
+            TrySetStringOrThrow(menuItemComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey, "menu parameter key");
             EditorUtility.SetDirty(menuItemComponent);
         }
 
-        private static void ConfigureParameters(Component parametersComponent, IReadOnlyList<GeneratedOutfitData> outfits)
+        private static void ConfigureParameters(Component parametersComponent, IReadOnlyList<GeneratedParameterData> parameters)
         {
             if (parametersComponent == null)
             {
-                return;
+                throw new InvalidOperationException("Failed to configure MA Parameters: component is null.");
             }
 
             SerializedObject serialized = new SerializedObject(parametersComponent);
             SerializedProperty arrayProperty = FindFirstArrayProperty(serialized, "parameters", "parameterList", "params", "Parameters");
             if (arrayProperty == null)
             {
-                return;
+                throw new InvalidOperationException("Failed to configure MA Parameters: parameter array field was not found.");
             }
 
             arrayProperty.ClearArray();
-            for (int i = 0; i < outfits.Count; i++)
+            for (int i = 0; i < parameters.Count; i++)
             {
                 arrayProperty.InsertArrayElementAtIndex(i);
                 SerializedProperty element = arrayProperty.GetArrayElementAtIndex(i);
                 if (element == null)
                 {
-                    continue;
+                    throw new InvalidOperationException("Failed to configure MA Parameters: inserted element is null.");
                 }
 
-                SetStringField(element, outfits[i].DisplayName, "name", "Name", "parameter", "Parameter", "parameterName");
-                SetStringField(element, outfits[i].ParameterKey, "internalParameter", "InternalParameter", "key", "Key", "internalName");
-                SetBoolField(element, true, "saved", "Saved", "isSaved");
-                SetBoolField(element, true, "synced", "Synced", "isSynced", "networkSynced");
-                SetFloatField(element, 0f, "defaultValue", "DefaultValue", "value");
+                SetStringFieldOrThrow(element, parameters[i].DisplayName, "parameter display name", "name", "Name", "parameter", "Parameter", "parameterName");
+                SetStringFieldOrThrow(element, parameters[i].ParameterName, "parameter key", "internalParameter", "InternalParameter", "key", "Key", "internalName");
+                SetBoolFieldOrThrow(element, true, "saved flag", "saved", "Saved", "isSaved");
+                SetBoolFieldOrThrow(element, true, "synced flag", "synced", "Synced", "isSynced", "networkSynced");
+                SetFloatFieldOrThrow(element, parameters[i].DefaultValue, "default value", "defaultValue", "DefaultValue", "value");
+                TrySetBoolField(element, parameters[i].IsBool, "isBool", "IsBool");
             }
 
             serialized.ApplyModifiedPropertiesWithoutUndo();
@@ -903,7 +1310,31 @@ namespace YourName.AvatarClosetTool.Editor
             return null;
         }
 
-        private static void SetStringField(SerializedProperty element, string value, params string[] fieldNames)
+        private static void SetStringFieldOrThrow(SerializedProperty element, string value, string fieldLabel, params string[] fieldNames)
+        {
+            if (!TrySetStringField(element, value, fieldNames))
+            {
+                throw new InvalidOperationException($"Failed to configure MA Parameters: {fieldLabel} field was not found.");
+            }
+        }
+
+        private static void SetBoolFieldOrThrow(SerializedProperty element, bool value, string fieldLabel, params string[] fieldNames)
+        {
+            if (!TrySetBoolField(element, value, fieldNames))
+            {
+                throw new InvalidOperationException($"Failed to configure MA Parameters: {fieldLabel} field was not found.");
+            }
+        }
+
+        private static void SetFloatFieldOrThrow(SerializedProperty element, float value, string fieldLabel, params string[] fieldNames)
+        {
+            if (!TrySetFloatField(element, value, fieldNames))
+            {
+                throw new InvalidOperationException($"Failed to configure MA Parameters: {fieldLabel} field was not found.");
+            }
+        }
+
+        private static bool TrySetStringField(SerializedProperty element, string value, params string[] fieldNames)
         {
             foreach (string fieldName in fieldNames)
             {
@@ -911,12 +1342,14 @@ namespace YourName.AvatarClosetTool.Editor
                 if (field != null && field.propertyType == SerializedPropertyType.String)
                 {
                     field.stringValue = value;
-                    return;
+                    return true;
                 }
             }
+
+            return false;
         }
 
-        private static void SetBoolField(SerializedProperty element, bool value, params string[] fieldNames)
+        private static bool TrySetBoolField(SerializedProperty element, bool value, params string[] fieldNames)
         {
             foreach (string fieldName in fieldNames)
             {
@@ -924,12 +1357,14 @@ namespace YourName.AvatarClosetTool.Editor
                 if (field != null && field.propertyType == SerializedPropertyType.Boolean)
                 {
                     field.boolValue = value;
-                    return;
+                    return true;
                 }
             }
+
+            return false;
         }
 
-        private static void SetFloatField(SerializedProperty element, float value, params string[] fieldNames)
+        private static bool TrySetFloatField(SerializedProperty element, float value, params string[] fieldNames)
         {
             foreach (string fieldName in fieldNames)
             {
@@ -942,18 +1377,20 @@ namespace YourName.AvatarClosetTool.Editor
                 if (field.propertyType == SerializedPropertyType.Float)
                 {
                     field.floatValue = value;
-                    return;
+                    return true;
                 }
 
                 if (field.propertyType == SerializedPropertyType.Integer)
                 {
                     field.intValue = Mathf.RoundToInt(value);
-                    return;
+                    return true;
                 }
             }
+
+            return false;
         }
 
-        private static void TrySetString(Component component, IEnumerable<string> memberNames, string value)
+        private static void TrySetStringOrThrow(Component component, IEnumerable<string> memberNames, string value, string fieldLabel)
         {
             foreach (string memberName in memberNames)
             {
@@ -962,9 +1399,11 @@ namespace YourName.AvatarClosetTool.Editor
                     return;
                 }
             }
+
+            throw new InvalidOperationException($"Failed to configure {component.GetType().Name}: could not set {fieldLabel}.");
         }
 
-        private static void TrySetBool(Component component, IEnumerable<string> memberNames, bool value)
+        private static void TrySetBoolOrThrow(Component component, IEnumerable<string> memberNames, bool value, string fieldLabel)
         {
             foreach (string memberName in memberNames)
             {
@@ -973,9 +1412,11 @@ namespace YourName.AvatarClosetTool.Editor
                     return;
                 }
             }
+
+            throw new InvalidOperationException($"Failed to configure {component.GetType().Name}: could not set {fieldLabel}.");
         }
 
-        private static void TrySetObjectRef(Component component, IEnumerable<string> memberNames, UnityEngine.Object value)
+        private static void TrySetObjectRefOrThrow(Component component, IEnumerable<string> memberNames, UnityEngine.Object value, string fieldLabel)
         {
             foreach (string memberName in memberNames)
             {
@@ -984,6 +1425,8 @@ namespace YourName.AvatarClosetTool.Editor
                     return;
                 }
             }
+
+            throw new InvalidOperationException($"Failed to configure {component.GetType().Name}: could not set {fieldLabel}.");
         }
 
         private static bool TrySetMember(Component component, string memberName, object value)
@@ -1028,10 +1471,49 @@ namespace YourName.AvatarClosetTool.Editor
             return false;
         }
 
+        private static string BuildPartParameterName(InventoryRoot root, ClosetOutfitSet set, ClosetOutfitPart part)
+        {
+            string rootPrefix = string.IsNullOrWhiteSpace(root.NamespacePrefix) ? "ACT" : root.NamespacePrefix;
+            string setName = SanitizeName(set.EffectiveDisplayName);
+            string partName = SanitizeName(part.EffectiveDisplayName);
+            string hash = Hash128.Compute($"{root.Component.GetInstanceID()}|{set.GetInstanceID()}|{part.GetInstanceID()}").ToString().Substring(0, 6).ToUpperInvariant();
+            return $"{rootPrefix}_PART_{setName}_{partName}_{hash}";
+        }
+
         private sealed class GeneratedOutfitData
         {
             public string DisplayName;
             public string ParameterKey;
+        }
+
+        private sealed class GeneratedParameterData
+        {
+            public string DisplayName;
+            public string ParameterName;
+            public float DefaultValue;
+            public bool IsBool;
+
+            public static GeneratedParameterData Bool(string parameterName, bool defaultOn)
+            {
+                return new GeneratedParameterData
+                {
+                    DisplayName = parameterName,
+                    ParameterName = parameterName,
+                    DefaultValue = defaultOn ? 1f : 0f,
+                    IsBool = true
+                };
+            }
+
+            public static GeneratedParameterData Int(string parameterName, int defaultValue)
+            {
+                return new GeneratedParameterData
+                {
+                    DisplayName = parameterName,
+                    ParameterName = parameterName,
+                    DefaultValue = defaultValue,
+                    IsBool = false
+                };
+            }
         }
     }
 }

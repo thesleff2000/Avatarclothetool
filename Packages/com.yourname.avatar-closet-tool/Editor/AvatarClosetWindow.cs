@@ -102,7 +102,8 @@ namespace YourName.AvatarClosetTool.Editor
 
         private void DrawActionSection()
         {
-            EditorGUILayout.LabelField($"Pipeline Status: {_status}", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Pipeline Status Flow: Validating... -> Repairing... -> Applying... -> Done", EditorStyles.miniBoldLabel);
+            EditorGUILayout.LabelField($"Current Status: {_status}", EditorStyles.boldLabel);
             if (GUILayout.Button("Apply"))
             {
                 RunPipeline();
@@ -111,6 +112,9 @@ namespace YourName.AvatarClosetTool.Editor
 
         private void RunPipeline()
         {
+            _status = "Validating...";
+            Repaint();
+
             ClosetPipeline pipeline = new ClosetPipeline();
             ClosetPipeline.PipelineRequest request = new ClosetPipeline.PipelineRequest
             {
