@@ -7,8 +7,8 @@ namespace YourName.AvatarClosetTool.Editor
 {
     public static class ClosetHierarchyContextMenu
     {
-        private const bool Enabled = false;
-
+        // GUI-only MVP: context menu workflow is disabled by default.
+#if AVATAR_CLOSET_ENABLE_CONTEXT_MENU
         [MenuItem("GameObject/Inventory 기능/메뉴 지정", false, 10)]
         private static void AssignMenuRootFromMenu()
         {
@@ -18,7 +18,7 @@ namespace YourName.AvatarClosetTool.Editor
         [MenuItem("GameObject/Inventory 기능/메뉴 지정", true)]
         private static bool ValidateAssignMenuRootFromMenu()
         {
-            return Enabled && Selection.activeGameObject != null;
+            return Selection.activeGameObject != null;
         }
 
         [MenuItem("GameObject/Inventory 기능/옷 지정", false, 11)]
@@ -30,7 +30,7 @@ namespace YourName.AvatarClosetTool.Editor
         [MenuItem("GameObject/Inventory 기능/옷 지정", true)]
         private static bool ValidateAssignOutfitSetFromMenu()
         {
-            return Enabled && Selection.activeGameObject != null;
+            return Selection.activeGameObject != null;
         }
 
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정", false, 12)]
@@ -42,7 +42,7 @@ namespace YourName.AvatarClosetTool.Editor
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정", true)]
         private static bool ValidateAssignOutfitPartFromMenu()
         {
-            return Enabled && Selection.activeGameObject != null;
+            return Selection.activeGameObject != null;
         }
 
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정 해제", false, 13)]
@@ -54,8 +54,9 @@ namespace YourName.AvatarClosetTool.Editor
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정 해제", true)]
         private static bool ValidateUnassignOutfitPartFromMenu()
         {
-            return Enabled && Selection.activeGameObject != null;
+            return Selection.activeGameObject != null;
         }
+#endif
 
         public static bool TryAssignMenuRoot(GameObject target, out string message)
         {

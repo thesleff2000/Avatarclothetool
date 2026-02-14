@@ -14,6 +14,8 @@
 5. Click `Apply` once. Pipeline runs in fixed order:
    - `ValidateOnly -> RepairIfNeeded -> ApplyChanges`
 
+Context-menu(OCI) workflow is intentionally disabled in this MVP build.
+
 ## Important Rules
 
 - Modular Avatar is required.
@@ -35,10 +37,12 @@
    - `AvatarClosetModule` exists under AvatarRoot
    - MA `Parameters` component contains `ACT_SET` (int)
    - MA `Merge Animator` has a controller reference
+   - MA `Menu Installer` has a generated `VRCExpressionsMenu` reference
    - Generated controller contains states per outfit set
    - Re-clicking Apply does not create duplicate module
 6. Run EditMode tests in Unity Test Runner:
    - Existing 4 tests + `ApplyCreatesFxControllerAndSetParam` should pass
+7. Upload/build avatar and verify Expression Menu shows `옷장` menu entries; selecting each entry switches active outfit set.
 
 ## Sample Guide
 

@@ -143,7 +143,16 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             GameObject setB = CreateChild(closetRoot, "SetB");
 
             ClosetPipeline pipeline = new ClosetPipeline();
-            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildRequest(avatarRoot, closetRoot, new[] { setA, setB }), null);
+            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(new ClosetPipeline.PipelineRequest
+            {
+                AvatarRoot = avatarRoot,
+                ClosetRoot = closetRoot,
+                UserOutfits = new List<ClosetPipeline.OutfitInput>
+                {
+                    new ClosetPipeline.OutfitInput { DisplayName = string.Empty, TargetGameObject = setA },
+                    new ClosetPipeline.OutfitInput { DisplayName = string.Empty, TargetGameObject = setB }
+                }
+            }, null);
 
             Assert.IsFalse(result.HasError);
             GameObject module = FindModule(avatarRoot);
@@ -164,6 +173,15 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             });
             Assert.IsNotNull(parameters);
             Assert.IsTrue(SerializedContainsStringValue(parameters, "ACT_SET"));
+
+            Component menuInstaller = FindComponentByTypeNames(module, new[]
+            {
+                "nadena.dev.modular_avatar.core.ModularAvatarMenuInstaller",
+                "ModularAvatarMenuInstaller"
+            });
+            Assert.IsNotNull(menuInstaller);
+            Assert.IsTrue(HasAnyObjectReference(menuInstaller));
+            Assert.IsFalse(result.Messages.Any(m => m.Severity == ClosetPipeline.MessageSeverity.Error));
         }
 
         private static ClosetPipeline.PipelineRequest BuildRequest(GameObject avatarRoot, GameObject closetRoot, IReadOnlyList<GameObject> outfits)
@@ -313,6 +331,24 @@ namespace YourName.AvatarClosetTool.Tests.Editor
                 enterChildren = true;
                 if (iterator.propertyType == SerializedPropertyType.String &&
                     iterator.stringValue == expectedValue)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasAnyObjectReference(Component component)
+        {
+            SerializedObject serialized = new SerializedObject(component);
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType == SerializedPropertyType.ObjectReference &&
+                    iterator.objectReferenceValue != null)
                 {
                     return true;
                 }

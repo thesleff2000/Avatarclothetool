@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -14,6 +15,7 @@ namespace YourName.AvatarClosetTool.Editor
     {
         private const string ModuleObjectName = "AvatarClosetModule";
         private const string RegistrationStoreObjectName = "AvatarClosetRegistrationStore";
+        private const string GeneratedAssetsFolder = "Assets/AvatarClosetGenerated";
         private const int CurrentModuleSchemaVersion = 1;
         private const string ExpectedModuleMarker = "avatar-closet-module-v1";
         private const string DefaultSetParameterName = "ACT_SET";
@@ -30,6 +32,12 @@ namespace YourName.AvatarClosetTool.Editor
         {
             "nadena.dev.modular_avatar.core.ModularAvatarMenuItem",
             "ModularAvatarMenuItem"
+        };
+
+        private static readonly string[] VrcExpressionsMenuTypeNames =
+        {
+            "VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionsMenu, VRCSDK3A",
+            "VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionsMenu"
         };
 
         private static readonly string[] MaObjectToggleTypeNames =
@@ -201,22 +209,22 @@ namespace YourName.AvatarClosetTool.Editor
                 return result;
             }
 
-            if (!TryResolveType("nadena.dev.modular_avatar.core.ModularAvatarMenuItem", out _))
-            {
-                AddMessage(
-                    result.Messages,
-                    MessageSeverity.Error,
-                    $"{MaInstallGuidance} 누락 타입: nadena.dev.modular_avatar.core.ModularAvatarMenuItem");
-                result.HasError = true;
-                return result;
-            }
-
             if (!TryGetRequiredMaTypes(out MaRequiredTypes maTypes, out string missingType))
             {
                 AddMessage(
                     result.Messages,
                     MessageSeverity.Error,
                     $"{MaInstallGuidance} 누락 타입: {missingType}");
+                result.HasError = true;
+                return result;
+            }
+
+            if (ResolveType(VrcExpressionsMenuTypeNames) == null)
+            {
+                AddMessage(
+                    result.Messages,
+                    MessageSeverity.Error,
+                    "VRCExpressionsMenu 타입을 찾을 수 없습니다. VRChat SDK3 Avatars가 설치되어 있어야 합니다.");
                 result.HasError = true;
                 return result;
             }
@@ -243,6 +251,13 @@ namespace YourName.AvatarClosetTool.Editor
             if (userOutfits.Count == 0)
             {
                 AddMessage(result.Messages, MessageSeverity.Error, "Outfit 목록이 비어 있습니다. Closet Root를 스캔하세요.");
+                result.HasError = true;
+                return result;
+            }
+
+            if (closetRoot.transform.childCount == 0)
+            {
+                AddMessage(result.Messages, MessageSeverity.Error, "Closet Root의 직계 자식(옷 세트)이 1개 이상 필요합니다.");
                 result.HasError = true;
                 return result;
             }
@@ -638,44 +653,23 @@ namespace YourName.AvatarClosetTool.Editor
 
             bool hasParameters = module.GetComponent(maTypes.ParametersType) != null;
             bool hasMergeAnimator = module.GetComponent(maTypes.MergeAnimatorType) != null;
-            bool hasMenuItems = module.GetComponentsInChildren(maTypes.MenuItemType, true).Length > 0;
-            if (!(hasParameters && hasMergeAnimator && hasMenuItems))
+            bool hasMenuInstaller = module.GetComponent(maTypes.MenuInstallerType) != null;
+            if (!(hasParameters && hasMergeAnimator && hasMenuInstaller))
             {
                 return false;
             }
 
-            for (int i = 0; i < module.transform.childCount; i++)
+            Component mergeAnimator = module.GetComponent(maTypes.MergeAnimatorType);
+            if (!HasObjectReferenceAssignableTo(mergeAnimator, typeof(RuntimeAnimatorController)))
             {
-                Transform child = module.transform.GetChild(i);
-                if (!child.name.StartsWith("MenuRoot_", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (child.GetComponent(maTypes.MenuInstallerType) == null)
-                {
-                    return false;
-                }
-
-                if (child.GetComponent(maTypes.MenuItemType) == null)
-                {
-                    return false;
-                }
+                return false;
             }
 
-            Transform[] transforms = module.GetComponentsInChildren<Transform>(true);
-            for (int i = 0; i < transforms.Length; i++)
+            Component menuInstaller = module.GetComponent(maTypes.MenuInstallerType);
+            Type menuAssetType = ResolveType(VrcExpressionsMenuTypeNames);
+            if (menuAssetType != null && !HasObjectReferenceAssignableTo(menuInstaller, menuAssetType))
             {
-                Transform node = transforms[i];
-                if (!node.name.StartsWith("Parts_", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (node.GetComponent(maTypes.MenuItemType) == null)
-                {
-                    return false;
-                }
+                return false;
             }
 
             return true;
@@ -904,9 +898,19 @@ namespace YourName.AvatarClosetTool.Editor
             ClearModuleChildren(module);
             RemoveComponentIfExists(module, required.ParametersType);
             RemoveComponentIfExists(module, required.MergeAnimatorType);
+            RemoveComponentIfExists(module, required.MenuInstallerType);
+            if (required.MenuItemType != null)
+            {
+                Component[] staleMenuItems = module.GetComponentsInChildren(required.MenuItemType, true);
+                for (int i = 0; i < staleMenuItems.Length; i++)
+                {
+                    Undo.DestroyObjectImmediate(staleMenuItems[i]);
+                }
+            }
 
             Component parametersComponent = EnsureComponentOrThrow(module, required.ParametersType, "MA Parameters");
             Component mergeAnimatorComponent = EnsureComponentOrThrow(module, required.MergeAnimatorType, "MA MergeAnimator");
+            Component menuInstallerComponent = EnsureComponentOrThrow(module, required.MenuInstallerType, "MA Menu Installer");
 
             string setParameterName = DefaultSetParameterName;
             ConfigureParameters(parametersComponent, new List<GeneratedParameterData>
@@ -916,27 +920,8 @@ namespace YourName.AvatarClosetTool.Editor
 
             AnimatorController controller = EnsureSetAnimatorController(avatarRoot, outfits, setParameterName);
             ConfigureMergeAnimator(mergeAnimatorComponent, controller);
-
-            GameObject menuRootNode = new GameObject("MenuRoot_Closet");
-            Undo.RegisterCreatedObjectUndo(menuRootNode, "Create Closet Menu Root");
-            Undo.SetTransformParent(menuRootNode.transform, module.transform, "Parent Closet Menu Root");
-
-            EnsureComponentOrThrow(menuRootNode, required.MenuInstallerType, "MA Menu Installer");
-            Component rootMenuItem = EnsureComponentOrThrow(menuRootNode, required.MenuItemType, "MA Menu Item");
-            ConfigureMenuItemAsSubmenu(rootMenuItem, "옷장");
-
-            for (int i = 0; i < outfits.Count; i++)
-            {
-                OutfitInput outfit = outfits[i];
-                string displayName = string.IsNullOrWhiteSpace(outfit.DisplayName) ? outfit.TargetGameObject.name : outfit.DisplayName.Trim();
-
-                GameObject buttonNode = new GameObject($"SetButton_{i}_{SanitizeName(displayName)}");
-                Undo.RegisterCreatedObjectUndo(buttonNode, "Create Set Button Node");
-                Undo.SetTransformParent(buttonNode.transform, menuRootNode.transform, "Parent Set Button Node");
-
-                Component buttonItem = EnsureComponentOrThrow(buttonNode, required.MenuItemType, "MA Menu Item");
-                ConfigureMenuItemAsSetButton(buttonItem, displayName, setParameterName, i);
-            }
+            ScriptableObject menuAsset = EnsureClosetMenuAsset(avatarRoot, outfits, setParameterName);
+            ConfigureMenuInstaller(menuInstallerComponent, menuAsset);
 
             EnsureModuleMetadata(module, outfits.Count);
         }
@@ -1101,12 +1086,6 @@ namespace YourName.AvatarClosetTool.Editor
             if (required.ParametersType == null)
             {
                 missingType = "ModularAvatarParameters";
-                return false;
-            }
-
-            if (required.MenuItemType == null)
-            {
-                missingType = "ModularAvatarMenuItem";
                 return false;
             }
 
@@ -1336,40 +1315,6 @@ namespace YourName.AvatarClosetTool.Editor
             }
         }
 
-        private static void ConfigureMenuItemAsSetButton(Component menuItemComponent, string displayName, string parameterName, int setValue)
-        {
-            if (menuItemComponent == null)
-            {
-                throw new InvalidOperationException("Failed to configure MA Menu Item set button: component is null.");
-            }
-
-            TrySetStringOrThrow(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName, "menu display name");
-
-            SerializedObject serialized = new SerializedObject(menuItemComponent);
-            bool parameterConfigured = TrySetStringByNameContains(serialized, "parameter", parameterName);
-            bool valueConfigured = TrySetNumericByNameContains(serialized, "value", setValue);
-            bool buttonConfigured = TrySetEnumPropertyByNameContains(serialized, "type", "button")
-                || TrySetEnumByNameContains(serialized, "button");
-
-            serialized.ApplyModifiedPropertiesWithoutUndo();
-            EditorUtility.SetDirty(menuItemComponent);
-
-            if (!parameterConfigured)
-            {
-                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} button parameter.");
-            }
-
-            if (!valueConfigured)
-            {
-                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} button value.");
-            }
-
-            if (!buttonConfigured)
-            {
-                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} control type as button.");
-            }
-        }
-
         private static void ConfigureMergeAnimator(Component mergeAnimatorComponent, AnimatorController controller)
         {
             if (mergeAnimatorComponent == null)
@@ -1400,14 +1345,168 @@ namespace YourName.AvatarClosetTool.Editor
             }
         }
 
+        private static ScriptableObject EnsureClosetMenuAsset(GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits, string parameterName)
+        {
+            Type menuType = ResolveType(VrcExpressionsMenuTypeNames);
+            if (menuType == null)
+            {
+                throw new InvalidOperationException("Failed to configure menu: VRCExpressionsMenu type could not be resolved.");
+            }
+
+            EnsureFolderExists(GeneratedAssetsFolder);
+            string keySeed = $"{GetRelativePath(avatarRoot.transform)}|menu|{outfits.Count}";
+            string hash = Hash128.Compute(keySeed).ToString().Substring(0, 8).ToUpperInvariant();
+            string path = $"{GeneratedAssetsFolder}/{SanitizeName(avatarRoot.name)}_{hash}_ClosetMenu.asset";
+
+            ScriptableObject menuAsset = AssetDatabase.LoadAssetAtPath(path, menuType) as ScriptableObject;
+            if (menuAsset == null)
+            {
+                menuAsset = ScriptableObject.CreateInstance(menuType);
+                menuAsset.name = $"ClosetMenu_{avatarRoot.name}";
+                AssetDatabase.CreateAsset(menuAsset, path);
+            }
+
+            RebuildMenuControls(menuAsset, outfits, parameterName);
+            EditorUtility.SetDirty(menuAsset);
+            AssetDatabase.SaveAssets();
+            return menuAsset;
+        }
+
+        private static void RebuildMenuControls(ScriptableObject menuAsset, IReadOnlyList<OutfitInput> outfits, string parameterName)
+        {
+            if (menuAsset == null)
+            {
+                throw new InvalidOperationException("Failed to configure menu controls: menu asset is null.");
+            }
+
+            Type menuType = menuAsset.GetType();
+            FieldInfo controlsField = menuType.GetField("controls", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (controlsField == null)
+            {
+                throw new InvalidOperationException("Failed to configure menu controls: controls field was not found.");
+            }
+
+            object controlsObject = controlsField.GetValue(menuAsset);
+            IList controls = controlsObject as IList;
+            if (controls == null)
+            {
+                throw new InvalidOperationException("Failed to configure menu controls: controls is not a list.");
+            }
+
+            controls.Clear();
+
+            Type controlType = controlsField.FieldType.IsGenericType
+                ? controlsField.FieldType.GetGenericArguments()[0]
+                : menuType.GetNestedType("Control", BindingFlags.Public | BindingFlags.NonPublic);
+            if (controlType == null)
+            {
+                throw new InvalidOperationException("Failed to configure menu controls: control type could not be resolved.");
+            }
+
+            Type parameterType = controlType.GetNestedType("Parameter", BindingFlags.Public | BindingFlags.NonPublic)
+                ?? menuType.GetNestedType("Control+Parameter", BindingFlags.Public | BindingFlags.NonPublic)
+                ?? menuType.Assembly.GetType($"{menuType.FullName}+Control+Parameter");
+            if (parameterType == null)
+            {
+                FieldInfo parameterField = controlType.GetField("parameter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (parameterField != null)
+                {
+                    parameterType = parameterField.FieldType;
+                }
+            }
+
+            for (int i = 0; i < outfits.Count; i++)
+            {
+                OutfitInput outfit = outfits[i];
+                string displayName = string.IsNullOrWhiteSpace(outfit.DisplayName) ? outfit.TargetGameObject.name : outfit.DisplayName.Trim();
+
+                object control = Activator.CreateInstance(controlType);
+                TrySetMemberValue(control, new[] { "name", "Name" }, displayName);
+                if (!TrySetEnumMemberValue(control, new[] { "type", "Type" }, "Button"))
+                {
+                    throw new InvalidOperationException("Failed to configure menu control type as Button.");
+                }
+
+                if (parameterType != null)
+                {
+                    object parameterObject = Activator.CreateInstance(parameterType);
+                    if (!TrySetMemberValue(parameterObject, new[] { "name", "Name" }, parameterName))
+                    {
+                        throw new InvalidOperationException("Failed to configure menu control parameter name.");
+                    }
+
+                    if (!TrySetMemberValue(control, new[] { "parameter", "Parameter" }, parameterObject))
+                    {
+                        throw new InvalidOperationException("Failed to assign menu control parameter.");
+                    }
+                }
+
+                if (!TrySetNumericMemberValue(control, new[] { "value", "Value" }, i))
+                {
+                    throw new InvalidOperationException("Failed to configure menu control value.");
+                }
+
+                controls.Add(control);
+            }
+        }
+
+        private static void ConfigureMenuInstaller(Component menuInstallerComponent, ScriptableObject menuAsset)
+        {
+            if (menuInstallerComponent == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Menu Installer: component is null.");
+            }
+
+            if (menuAsset == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Menu Installer: menu asset is null.");
+            }
+
+            if (TrySetMember(menuInstallerComponent, "menuToAppend", menuAsset) ||
+                TrySetMember(menuInstallerComponent, "menuToInstall", menuAsset) ||
+                TrySetMember(menuInstallerComponent, "menu", menuAsset) ||
+                TrySetMember(menuInstallerComponent, "Menu", menuAsset))
+            {
+                EditorUtility.SetDirty(menuInstallerComponent);
+                return;
+            }
+
+            SerializedObject serialized = new SerializedObject(menuInstallerComponent);
+            SerializedProperty iterator = serialized.GetIterator();
+            bool assigned = false;
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                if (iterator.name.IndexOf("menu", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    iterator.objectReferenceValue = menuAsset;
+                    assigned = true;
+                    break;
+                }
+            }
+
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(menuInstallerComponent);
+
+            if (!assigned)
+            {
+                throw new InvalidOperationException("Failed to configure MA Menu Installer: could not find menu asset reference field.");
+            }
+        }
+
         private static AnimatorController EnsureSetAnimatorController(GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits, string parameterName)
         {
-            string folder = "Assets/AvatarClosetGenerated";
-            EnsureFolderExists(folder);
+            EnsureFolderExists(GeneratedAssetsFolder);
 
             string keySeed = $"{GetRelativePath(avatarRoot.transform)}|{outfits.Count}";
             string hash = Hash128.Compute(keySeed).ToString().Substring(0, 8).ToUpperInvariant();
-            string controllerPath = $"{folder}/{SanitizeName(avatarRoot.name)}_{hash}_ClosetFX.controller";
+            string controllerPath = $"{GeneratedAssetsFolder}/{SanitizeName(avatarRoot.name)}_{hash}_ClosetFX.controller";
 
             AnimatorController controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
             if (controller == null)
@@ -1592,7 +1691,10 @@ namespace YourName.AvatarClosetTool.Editor
                     throw new InvalidOperationException("Failed to configure MA Parameters: inserted element is null.");
                 }
 
-                SetStringFieldOrThrow(element, parameters[i].DisplayName, "parameter display name", "name", "Name", "parameter", "Parameter", "parameterName");
+                if (!TrySetStringField(element, parameters[i].DisplayName, "name", "Name", "parameter", "Parameter", "parameterName"))
+                {
+                    Debug.LogWarning("[ClosetPipeline] MA Parameters entry display name field not found. Continuing without display name.");
+                }
                 SetStringFieldOrThrow(element, parameters[i].ParameterName, "parameter key", "internalParameter", "InternalParameter", "key", "Key", "internalName");
                 SetBoolFieldOrThrow(element, true, "saved flag", "saved", "Saved", "isSaved");
                 SetBoolFieldOrThrow(element, true, "synced flag", "synced", "Synced", "isSynced", "networkSynced");
@@ -1794,58 +1896,6 @@ namespace YourName.AvatarClosetTool.Editor
             return false;
         }
 
-        private static bool TrySetStringByNameContains(SerializedObject serialized, string nameToken, string value)
-        {
-            SerializedProperty iterator = serialized.GetIterator();
-            bool enterChildren = true;
-            while (iterator.NextVisible(enterChildren))
-            {
-                enterChildren = true;
-                if (iterator.propertyType != SerializedPropertyType.String)
-                {
-                    continue;
-                }
-
-                if (!iterator.name.ToLowerInvariant().Contains(nameToken.ToLowerInvariant()))
-                {
-                    continue;
-                }
-
-                iterator.stringValue = value;
-                return true;
-            }
-
-            return false;
-        }
-
-        private static bool TrySetNumericByNameContains(SerializedObject serialized, string nameToken, int value)
-        {
-            SerializedProperty iterator = serialized.GetIterator();
-            bool enterChildren = true;
-            while (iterator.NextVisible(enterChildren))
-            {
-                enterChildren = true;
-                if (!iterator.name.ToLowerInvariant().Contains(nameToken.ToLowerInvariant()))
-                {
-                    continue;
-                }
-
-                if (iterator.propertyType == SerializedPropertyType.Integer)
-                {
-                    iterator.intValue = value;
-                    return true;
-                }
-
-                if (iterator.propertyType == SerializedPropertyType.Float)
-                {
-                    iterator.floatValue = value;
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         private static bool TrySetEnumPropertyByNameContains(SerializedObject serialized, string propertyNameToken, string enumValueToken)
         {
             SerializedProperty iterator = serialized.GetIterator();
@@ -2036,6 +2086,161 @@ namespace YourName.AvatarClosetTool.Editor
             throw new InvalidOperationException($"Failed to configure {component.GetType().Name}: could not set {fieldLabel}.");
         }
 
+        private static bool TrySetMemberValue(object target, IEnumerable<string> memberNames, object value)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            foreach (string memberName in memberNames)
+            {
+                if (TrySetMemberValue(target, memberName, value))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TrySetMemberValue(object target, string memberName, object value)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            Type type = target.GetType();
+
+            FieldInfo field = type.GetField(memberName, flags);
+            if (field != null)
+            {
+                if (value == null)
+                {
+                    if (!field.FieldType.IsValueType || Nullable.GetUnderlyingType(field.FieldType) != null)
+                    {
+                        field.SetValue(target, null);
+                        return true;
+                    }
+                }
+                else if (field.FieldType.IsAssignableFrom(value.GetType()))
+                {
+                    field.SetValue(target, value);
+                    return true;
+                }
+            }
+
+            PropertyInfo property = type.GetProperty(memberName, flags);
+            if (property != null && property.CanWrite)
+            {
+                Type propertyType = property.PropertyType;
+                if (value == null || propertyType.IsAssignableFrom(value.GetType()))
+                {
+                    property.SetValue(target, value);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TrySetNumericMemberValue(object target, IEnumerable<string> memberNames, int value)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            Type type = target.GetType();
+            foreach (string memberName in memberNames)
+            {
+                FieldInfo field = type.GetField(memberName, flags);
+                if (field != null)
+                {
+                    if (field.FieldType == typeof(int))
+                    {
+                        field.SetValue(target, value);
+                        return true;
+                    }
+
+                    if (field.FieldType == typeof(float))
+                    {
+                        field.SetValue(target, (float)value);
+                        return true;
+                    }
+                }
+
+                PropertyInfo property = type.GetProperty(memberName, flags);
+                if (property == null || !property.CanWrite)
+                {
+                    continue;
+                }
+
+                if (property.PropertyType == typeof(int))
+                {
+                    property.SetValue(target, value);
+                    return true;
+                }
+
+                if (property.PropertyType == typeof(float))
+                {
+                    property.SetValue(target, (float)value);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TrySetEnumMemberValue(object target, IEnumerable<string> memberNames, string enumNameContains)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            Type type = target.GetType();
+            foreach (string memberName in memberNames)
+            {
+                FieldInfo field = type.GetField(memberName, flags);
+                if (field != null && field.FieldType.IsEnum)
+                {
+                    Array values = Enum.GetValues(field.FieldType);
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        object enumValue = values.GetValue(i);
+                        if (enumValue.ToString().IndexOf(enumNameContains, StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            continue;
+                        }
+
+                        field.SetValue(target, enumValue);
+                        return true;
+                    }
+                }
+
+                PropertyInfo property = type.GetProperty(memberName, flags);
+                if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)
+                {
+                    continue;
+                }
+
+                Array valuesForProperty = Enum.GetValues(property.PropertyType);
+                for (int i = 0; i < valuesForProperty.Length; i++)
+                {
+                    object enumValue = valuesForProperty.GetValue(i);
+                    if (enumValue.ToString().IndexOf(enumNameContains, StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+
+                    property.SetValue(target, enumValue);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static bool TrySetMember(Component component, string memberName, object value)
         {
             if (component == null)
@@ -2071,6 +2276,39 @@ namespace YourName.AvatarClosetTool.Editor
                 if (value == null || targetType.IsAssignableFrom(value.GetType()))
                 {
                     property.SetValue(component, value);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasObjectReferenceAssignableTo(Component component, Type targetType)
+        {
+            if (component == null || targetType == null)
+            {
+                return false;
+            }
+
+            SerializedObject serialized = new SerializedObject(component);
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                UnityEngine.Object value = iterator.objectReferenceValue;
+                if (value == null)
+                {
+                    continue;
+                }
+
+                if (targetType.IsAssignableFrom(value.GetType()))
+                {
                     return true;
                 }
             }
