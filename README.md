@@ -1,45 +1,45 @@
-# Avatar Closet Tool (Unity Package Skeleton)
+# Avatar Closet Tool
 
-`com.yourname.avatar-closet-tool` is a distributable Unity package skeleton for automating VRChat avatar outfit workflows.
+`com.yourname.avatar-closet-tool` is a non-destructive VRChat avatar closet tool based on Modular Avatar (MA).
 
-## Goal
+## MVP Workflow (OCI-style)
 
-- Build a non-destructive avatar closet automation tool.
-- Keep runtime and editor implementation separated.
-- Provide a safe foundation for MA-based generation and repair/rebuild workflows.
+1. In Hierarchy, right-click GameObject and use:
+   - `Inventory 기능/메뉴 지정`
+   - `Inventory 기능/옷 지정`
+   - `Inventory 기능/옷 파츠 지정` or `Inventory 기능/옷 파츠 지정 해제`
+2. Open `Tools/Avatar Closet/Open Window`.
+3. Set `Avatar Root`.
+4. Click `Apply` once.
+5. Pipeline runs in fixed order:
+   - `ValidateOnly -> RepairIfNeeded -> ApplyChanges`
 
-## Repository Structure
+## Important Rules
 
-```text
-Packages/
-  com.yourname.avatar-closet-tool/
-    package.json
-    Runtime/
-      com.yourname.avatar-closet-tool.Runtime.asmdef
-      AvatarClosetRuntimeMarker.cs
-    Editor/
-      com.yourname.avatar-closet-tool.Editor.asmdef
-      AvatarClosetToolMenu.cs
-README.md
-AGENTS.md
-LICENSE
-```
+- Modular Avatar is required.
+- If MA is missing, Validate returns error and Repair/Apply do not execute.
+- Source FX/Menu/Params assets are not edited directly.
+- Generated data is written under `AvatarRoot/AvatarClosetModule` only.
 
-## Development Notes
+## Local Unity Verification
 
-- Runtime code lives under `Runtime/`.
-- Unity editor-only code lives under `Editor/`.
-- Editor assembly references Runtime assembly.
-- Current editor menu placeholder:
-  - `Tools > Avatar Closet Tool > Open Placeholder Window`
+1. Ensure MA is installed in project:
+   - VCC: `Manage Project > Add Modular Avatar`
+2. Build hierarchy:
+   - Menu root object with `ClosetMenuRoot`
+   - Outfit set objects under menu root with `ClosetOutfitSet`
+   - Optional part objects under set with `ClosetOutfitPart`
+3. Click `Apply` in window.
+4. Confirm:
+   - `AvatarClosetModule` exists under AvatarRoot
+   - Re-clicking Apply does not create duplicate module
+   - Invalid placement (set outside root / part outside set) produces friendly validation error
+5. Run EditMode tests in Unity Test Runner:
+   - Existing 4 tests + new 2 tests should pass
 
-## How To Use In Unity
+## Sample Guide
 
-1. Open a Unity project.
-2. Place this package at `Packages/com.yourname.avatar-closet-tool`.
-3. Let Unity reimport scripts.
-4. Confirm there are no compile errors.
-5. Use the placeholder menu to verify editor assembly load.
+See `Packages/com.yourname.avatar-closet-tool/Samples~/QuickStart/README.md`.
 
 ## License
 

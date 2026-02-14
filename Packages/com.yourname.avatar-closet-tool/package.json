@@ -7,5 +7,12 @@
   "author": {
     "name": "yourname"
   },
+  "samples": [
+    {
+      "displayName": "QuickStart",
+      "description": "Minimal 3-minute hierarchy workflow for menu root/set/part assignment.",
+      "path": "Samples~/QuickStart"
+    }
+  ],
   "license": "MIT"
 }

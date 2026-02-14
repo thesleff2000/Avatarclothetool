@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using UnityEditor;
 using UnityEngine;
 using YourName.AvatarClosetTool.Runtime;
@@ -14,10 +13,22 @@ namespace YourName.AvatarClosetTool.Editor
             TryAssignMenuRoot(Selection.activeGameObject, out _);
         }
 
+        [MenuItem("GameObject/Inventory 기능/메뉴 지정", true)]
+        private static bool ValidateAssignMenuRootFromMenu()
+        {
+            return Selection.activeGameObject != null;
+        }
+
         [MenuItem("GameObject/Inventory 기능/옷 지정", false, 11)]
         private static void AssignOutfitSetFromMenu()
         {
             TryAssignOutfitSet(Selection.activeGameObject, out _);
+        }
+
+        [MenuItem("GameObject/Inventory 기능/옷 지정", true)]
+        private static bool ValidateAssignOutfitSetFromMenu()
+        {
+            return Selection.activeGameObject != null;
         }
 
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정", false, 12)]
@@ -26,10 +37,22 @@ namespace YourName.AvatarClosetTool.Editor
             TryAssignOutfitPart(Selection.activeGameObject, out _);
         }
 
+        [MenuItem("GameObject/Inventory 기능/옷 파츠 지정", true)]
+        private static bool ValidateAssignOutfitPartFromMenu()
+        {
+            return Selection.activeGameObject != null;
+        }
+
         [MenuItem("GameObject/Inventory 기능/옷 파츠 지정 해제", false, 13)]
         private static void UnassignOutfitPartFromMenu()
         {
             TryUnassignOutfitPart(Selection.activeGameObject, out _);
+        }
+
+        [MenuItem("GameObject/Inventory 기능/옷 파츠 지정 해제", true)]
+        private static bool ValidateUnassignOutfitPartFromMenu()
+        {
+            return Selection.activeGameObject != null;
         }
 
         public static bool TryAssignMenuRoot(GameObject target, out string message)
