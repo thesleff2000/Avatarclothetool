@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using YourName.AvatarClosetTool.Editor;
 using YourName.AvatarClosetTool.Runtime;
@@ -196,6 +197,49 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             Assert.IsTrue(validation.Messages.Any(m => m.Text.Contains("OutfitPart") && m.Text.Contains("ClosetOutfitSet")));
         }
 
+        [Test]
+        public void ObjectToggleTargetIsAddedViaSerializedObject()
+        {
+            if (!TryResolveType(new[]
+                {
+                    "nadena.dev.modular_avatar.core.ModularAvatarObjectToggle",
+                    "ModularAvatarObjectToggle"
+                }, out System.Type objectToggleType))
+            {
+                Assert.Inconclusive("Modular Avatar ObjectToggle type is not available in this project.");
+            }
+
+            GameObject avatarRoot = CreateRoot("AvatarRoot_ObjectToggleSerialized");
+            GameObject menuRootObject = CreateChild(avatarRoot, "MenuRoot");
+            menuRootObject.AddComponent<ClosetMenuRoot>();
+
+            GameObject setObject = CreateChild(menuRootObject, "SetA");
+            ClosetOutfitSet set = setObject.AddComponent<ClosetOutfitSet>();
+            set.SetIndex = 0;
+
+            ClosetPipeline pipeline = new ClosetPipeline();
+            ClosetPipeline.PipelineResult result = pipeline.RunPipeline(BuildEmptyRequest(avatarRoot), null);
+            Assert.IsFalse(result.HasError, "Pipeline should succeed before inspecting generated object toggles.");
+
+            GameObject module = FindModule(avatarRoot);
+            Assert.IsNotNull(module);
+
+            Component[] toggles = module.GetComponentsInChildren(objectToggleType, true);
+            Assert.Greater(toggles.Length, 0, "Generated module should contain at least one MA ObjectToggle.");
+
+            bool hasReferenceToSet = false;
+            for (int i = 0; i < toggles.Length; i++)
+            {
+                if (HasObjectReferenceInAnyArray(toggles[i], set.gameObject))
+                {
+                    hasReferenceToSet = true;
+                    break;
+                }
+            }
+
+            Assert.IsTrue(hasReferenceToSet, "At least one ObjectToggle serialized target-list array must reference the set GameObject.");
+        }
+
         private GameObject CreateInventoryTreeWithOneSet(string rootName, out ClosetOutfitSet set)
         {
             GameObject avatarRoot = CreateRoot(rootName);
@@ -264,6 +308,101 @@ namespace YourName.AvatarClosetTool.Tests.Editor
             AvatarClosetRegistrationStore[] stores = avatarRoot.GetComponentsInChildren<AvatarClosetRegistrationStore>(true);
             Assert.AreEqual(1, stores.Length);
             return stores[0];
+        }
+
+        private static bool TryResolveType(IEnumerable<string> names, out System.Type resolved)
+        {
+            foreach (string name in names)
+            {
+                resolved = System.Type.GetType(name, false);
+                if (resolved != null)
+                {
+                    return true;
+                }
+            }
+
+            foreach (System.Reflection.Assembly assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                foreach (string name in names)
+                {
+                    try
+                    {
+                        System.Type byName = assembly.GetType(name, false);
+                        if (byName != null)
+                        {
+                            resolved = byName;
+                            return true;
+                        }
+                    }
+                    catch (System.Reflection.ReflectionTypeLoadException)
+                    {
+                        // Ignore partially loadable assemblies.
+                    }
+                }
+            }
+
+            resolved = null;
+            return false;
+        }
+
+        private static bool HasObjectReferenceInAnyArray(Component component, Object expected)
+        {
+            SerializedObject serialized = new SerializedObject(component);
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (!iterator.isArray || iterator.propertyType == SerializedPropertyType.String)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < iterator.arraySize; i++)
+                {
+                    SerializedProperty element = iterator.GetArrayElementAtIndex(i);
+                    if (ElementContainsObjectReference(element, expected))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ElementContainsObjectReference(SerializedProperty element, Object expected)
+        {
+            if (element == null)
+            {
+                return false;
+            }
+
+            if (element.propertyType == SerializedPropertyType.ObjectReference)
+            {
+                return element.objectReferenceValue == expected;
+            }
+
+            if (!element.hasVisibleChildren)
+            {
+                return false;
+            }
+
+            SerializedProperty cursor = element.Copy();
+            SerializedProperty end = cursor.GetEndProperty();
+            bool enterChildren = true;
+            while (cursor.NextVisible(enterChildren) && !SerializedProperty.EqualContents(cursor, end))
+            {
+                enterChildren = true;
+                if (cursor.propertyType == SerializedPropertyType.ObjectReference &&
+                    cursor.objectReferenceValue == expected)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }

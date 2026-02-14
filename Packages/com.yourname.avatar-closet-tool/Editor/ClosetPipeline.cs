@@ -43,12 +43,19 @@ namespace YourName.AvatarClosetTool.Editor
             "ModularAvatarMergeAnimator"
         };
 
+        private static readonly string[] MaMenuInstallerTypeNames =
+        {
+            "nadena.dev.modular_avatar.core.ModularAvatarMenuInstaller",
+            "ModularAvatarMenuInstaller"
+        };
+
         private sealed class MaRequiredTypes
         {
             public Type ParametersType;
             public Type MenuItemType;
             public Type ObjectToggleType;
             public Type MergeAnimatorType;
+            public Type MenuInstallerType;
         }
 
         public enum MessageSeverity
@@ -654,7 +661,46 @@ namespace YourName.AvatarClosetTool.Editor
             bool hasMenuItems = module.GetComponentsInChildren(maTypes.MenuItemType, true).Length > 0;
             bool hasObjectToggles = module.GetComponentsInChildren(maTypes.ObjectToggleType, true).Length > 0;
 
-            return hasParameters && hasMergeAnimator && hasMenuItems && hasObjectToggles;
+            if (!(hasParameters && hasMergeAnimator && hasMenuItems && hasObjectToggles))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < module.transform.childCount; i++)
+            {
+                Transform child = module.transform.GetChild(i);
+                if (!child.name.StartsWith("MenuRoot_", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (child.GetComponent(maTypes.MenuInstallerType) == null)
+                {
+                    return false;
+                }
+
+                if (child.GetComponent(maTypes.MenuItemType) == null)
+                {
+                    return false;
+                }
+            }
+
+            Transform[] transforms = module.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                Transform node = transforms[i];
+                if (!node.name.StartsWith("Parts_", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (node.GetComponent(maTypes.MenuItemType) == null)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static void ValidateParameterCollision(GameObject avatarRoot, IReadOnlyList<OutfitInput> outfits, List<PipelineMessage> messages)
@@ -931,11 +977,16 @@ namespace YourName.AvatarClosetTool.Editor
             for (int r = 0; r < roots.Count; r++)
             {
                 InventoryRoot root = roots[r];
-                generatedParameters.Add(GeneratedParameterData.Int(root.SetParameterName, 0));
+                // MVP choice: use bool-based set toggles for robust one-click behavior.
+                // Future extension point: replace with single int ACT_SET + condition-based state machine.
 
                 GameObject rootNode = new GameObject($"MenuRoot_{SanitizeName(root.DisplayName)}");
                 Undo.RegisterCreatedObjectUndo(rootNode, "Create Menu Root Node");
                 Undo.SetTransformParent(rootNode.transform, module.transform, "Parent Menu Root Node");
+
+                EnsureComponentOrThrow(rootNode, required.MenuInstallerType, "MA Menu Installer");
+                Component rootMenuItem = EnsureComponentOrThrow(rootNode, required.MenuItemType, "MA Menu Item");
+                ConfigureMenuItemAsSubmenu(rootMenuItem, root.DisplayName);
 
                 for (int s = 0; s < root.Sets.Count; s++)
                 {
@@ -961,6 +1012,8 @@ namespace YourName.AvatarClosetTool.Editor
                     GameObject partsMenuNode = new GameObject($"Parts_{SanitizeName(set.DisplayName)}");
                     Undo.RegisterCreatedObjectUndo(partsMenuNode, "Create Parts Menu Node");
                     Undo.SetTransformParent(partsMenuNode.transform, setNode.transform, "Parent Parts Menu Node");
+                    Component partsMenuItem = EnsureComponentOrThrow(partsMenuNode, required.MenuItemType, "MA Menu Item");
+                    ConfigureMenuItemAsSubmenu(partsMenuItem, "Parts");
 
                     for (int p = 0; p < set.Parts.Count; p++)
                     {
@@ -1061,7 +1114,8 @@ namespace YourName.AvatarClosetTool.Editor
                 ParametersType = ResolveType(MaParametersTypeNames),
                 MenuItemType = ResolveType(MaMenuItemTypeNames),
                 ObjectToggleType = ResolveType(MaObjectToggleTypeNames),
-                MergeAnimatorType = ResolveType(MaMergeAnimatorTypeNames)
+                MergeAnimatorType = ResolveType(MaMergeAnimatorTypeNames),
+                MenuInstallerType = ResolveType(MaMenuInstallerTypeNames)
             };
 
             if (required.ParametersType == null)
@@ -1085,6 +1139,12 @@ namespace YourName.AvatarClosetTool.Editor
             if (required.MergeAnimatorType == null)
             {
                 missingType = "ModularAvatarMergeAnimator";
+                return false;
+            }
+
+            if (required.MenuInstallerType == null)
+            {
+                missingType = "ModularAvatarMenuInstaller";
                 return false;
             }
 
@@ -1241,7 +1301,22 @@ namespace YourName.AvatarClosetTool.Editor
                 throw new InvalidOperationException("Failed to configure MA Object Toggle: component is null.");
             }
 
-            TrySetObjectRefOrThrow(toggleComponent, new[] { "targetObject", "TargetObject", "objectReference", "Object" }, targetObject, "target object");
+            if (targetObject == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Object Toggle: target object is null.");
+            }
+
+            try
+            {
+                AssignObjectToggleTargetViaSerializedObject(toggleComponent, targetObject);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to configure MA Object Toggle target list via SerializedObject: {ex.Message}",
+                    ex);
+            }
+
             TrySetStringOrThrow(toggleComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey, "parameter key");
             TrySetBoolOrThrow(toggleComponent, new[] { "saved", "Saved", "isSaved" }, true, "saved flag");
             TrySetBoolOrThrow(toggleComponent, new[] { "synced", "Synced", "isSynced", "networkSynced" }, true, "synced flag");
@@ -1258,6 +1333,36 @@ namespace YourName.AvatarClosetTool.Editor
             TrySetStringOrThrow(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName, "menu display name");
             TrySetStringOrThrow(menuItemComponent, new[] { "parameter", "Parameter", "parameterName", "internalParameter" }, parameterKey, "menu parameter key");
             EditorUtility.SetDirty(menuItemComponent);
+        }
+
+        private static void ConfigureMenuItemAsSubmenu(Component menuItemComponent, string displayName)
+        {
+            if (menuItemComponent == null)
+            {
+                throw new InvalidOperationException("Failed to configure MA Menu Item submenu: component is null.");
+            }
+
+            TrySetStringOrThrow(menuItemComponent, new[] { "name", "Name", "menuName", "MenuName", "label", "Label" }, displayName, "menu display name");
+
+            SerializedObject serialized = new SerializedObject(menuItemComponent);
+            bool submenuConfigured = TrySetEnumByNameContains(serialized, "submenu")
+                || TrySetBoolByNameContains(serialized, "submenu", true)
+                || TrySetBoolByNameContains(serialized, "subMenu", true);
+            bool childrenConfigured = TrySetEnumByNameContains(serialized, "children")
+                || TrySetEnumByNameContains(serialized, "child");
+
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(menuItemComponent);
+
+            if (!submenuConfigured)
+            {
+                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} as submenu.");
+            }
+
+            if (!childrenConfigured)
+            {
+                throw new InvalidOperationException($"Failed to configure {menuItemComponent.GetType().Name} submenu source as children.");
+            }
         }
 
         private static void ConfigureParameters(Component parametersComponent, IReadOnlyList<GeneratedParameterData> parameters)
@@ -1308,6 +1413,215 @@ namespace YourName.AvatarClosetTool.Editor
             }
 
             return null;
+        }
+
+        private static void AssignObjectToggleTargetViaSerializedObject(Component toggleComponent, GameObject targetObject)
+        {
+            SerializedObject serialized = new SerializedObject(toggleComponent);
+            List<string> candidateArrays = new List<string>();
+            List<string> inspectedArrays = new List<string>();
+
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.name == "m_Script")
+                {
+                    continue;
+                }
+
+                if (iterator.isArray && iterator.propertyType != SerializedPropertyType.String)
+                {
+                    candidateArrays.Add(iterator.propertyPath);
+                }
+            }
+
+            for (int i = 0; i < candidateArrays.Count; i++)
+            {
+                string path = candidateArrays[i];
+                SerializedProperty arrayProp = serialized.FindProperty(path);
+                if (arrayProp == null || !arrayProp.isArray)
+                {
+                    continue;
+                }
+
+                int originalSize = arrayProp.arraySize;
+                bool inserted = false;
+                if (originalSize == 0)
+                {
+                    arrayProp.InsertArrayElementAtIndex(0);
+                    inserted = true;
+                }
+
+                if (arrayProp.arraySize == 0)
+                {
+                    continue;
+                }
+
+                int inspectIndex = inserted ? 0 : arrayProp.arraySize - 1;
+                SerializedProperty element = arrayProp.GetArrayElementAtIndex(inspectIndex);
+                SerializedProperty objectField = FindObjectReferenceField(element);
+                if (objectField == null)
+                {
+                    RevertInsertedElement(arrayProp, originalSize);
+                    inspectedArrays.Add(path);
+                    continue;
+                }
+
+                if (!inserted)
+                {
+                    arrayProp.InsertArrayElementAtIndex(arrayProp.arraySize);
+                    inspectIndex = arrayProp.arraySize - 1;
+                    element = arrayProp.GetArrayElementAtIndex(inspectIndex);
+                    objectField = FindObjectReferenceField(element);
+                    if (objectField == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"배열 후보 '{path}'를 타겟 리스트로 식별했지만 새 element에서 objectReference 필드를 찾지 못했습니다.");
+                    }
+                }
+
+                objectField.objectReferenceValue = targetObject;
+                SetToggleElementDefaultState(element, true);
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+                EditorUtility.SetDirty(toggleComponent);
+                return;
+            }
+
+            string scanned = inspectedArrays.Count > 0 ? string.Join(", ", inspectedArrays) : "<none>";
+            throw new InvalidOperationException(
+                $"어떤 SerializedProperty 배열도 타겟 리스트로 식별하지 못함. 검사한 배열: {scanned}");
+        }
+
+        private static void RevertInsertedElement(SerializedProperty arrayProp, int originalSize)
+        {
+            while (arrayProp.arraySize > originalSize)
+            {
+                arrayProp.DeleteArrayElementAtIndex(arrayProp.arraySize - 1);
+            }
+        }
+
+        private static SerializedProperty FindObjectReferenceField(SerializedProperty element)
+        {
+            if (element == null)
+            {
+                return null;
+            }
+
+            if (element.propertyType == SerializedPropertyType.ObjectReference)
+            {
+                return element;
+            }
+
+            if (!element.hasVisibleChildren)
+            {
+                return null;
+            }
+
+            SerializedProperty cursor = element.Copy();
+            SerializedProperty end = cursor.GetEndProperty();
+            bool enterChildren = true;
+            while (cursor.NextVisible(enterChildren) && !SerializedProperty.EqualContents(cursor, end))
+            {
+                enterChildren = true;
+                if (cursor.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                return cursor.Copy();
+            }
+
+            return null;
+        }
+
+        private static void SetToggleElementDefaultState(SerializedProperty element, bool enabledWhenToggleOn)
+        {
+            if (element == null || !element.hasVisibleChildren)
+            {
+                return;
+            }
+
+            string[] preferredNames = { "active", "enabled", "on", "state", "value" };
+            SerializedProperty cursor = element.Copy();
+            SerializedProperty end = cursor.GetEndProperty();
+            bool enterChildren = true;
+            while (cursor.NextVisible(enterChildren) && !SerializedProperty.EqualContents(cursor, end))
+            {
+                enterChildren = true;
+                if (cursor.propertyType != SerializedPropertyType.Boolean)
+                {
+                    continue;
+                }
+
+                string name = cursor.name.ToLowerInvariant();
+                for (int i = 0; i < preferredNames.Length; i++)
+                {
+                    if (name.Contains(preferredNames[i]))
+                    {
+                        cursor.boolValue = enabledWhenToggleOn;
+                        return;
+                    }
+                }
+            }
+        }
+
+        private static bool TrySetBoolByNameContains(SerializedObject serialized, string nameToken, bool value)
+        {
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.Boolean)
+                {
+                    continue;
+                }
+
+                if (!iterator.name.ToLowerInvariant().Contains(nameToken.ToLowerInvariant()))
+                {
+                    continue;
+                }
+
+                iterator.boolValue = value;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TrySetEnumByNameContains(SerializedObject serialized, string enumValueToken)
+        {
+            SerializedProperty iterator = serialized.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.Enum)
+                {
+                    continue;
+                }
+
+                string[] names = iterator.enumDisplayNames;
+                if (names == null || names.Length == 0)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < names.Length; i++)
+                {
+                    if (!names[i].ToLowerInvariant().Contains(enumValueToken.ToLowerInvariant()))
+                    {
+                        continue;
+                    }
+
+                    iterator.enumValueIndex = i;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void SetStringFieldOrThrow(SerializedProperty element, string value, string fieldLabel, params string[] fieldNames)
